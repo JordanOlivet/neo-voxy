@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "opaqueDrawBuffers": [0],
+  "translucentDrawBuffers": [0],
+  "uniforms": [
+    "vxRenderDistance",
+    "vxViewProj",
+    "vxViewProjInv",
+    "vxViewProjPrev",
+    "vxModelView",
+    "vxModelViewInv",
+    "vxModelViewPrev",
+    "vxProj",
+    "vxProjInv",
+    "vxProjPrev"
+  ]
+}

@@ -68,10 +68,15 @@ Nettoyage effectué :
 - `MixinStandardMacros` conservé (actif et fonctionnel, le README était dans l'erreur)
 - README mis à jour pour refléter l'état réel
 
-### 3.2 LOD Streaming casse avec Iris
+### 3.2 LOD Streaming + Iris [MITIGE / NON REPRODUIT 2026-04-16]
 
-Le commit `c53b8e24` documente explicitement : "continuous lod streaming = broken iris rendering".
-C'est le bug le plus impactant pour l'experience utilisateur.
+Le commit `c53b8e24` documentait : "continuous lod streaming = broken iris rendering".
+Tests en jeu (BSL + Photon + Complementary Reimagined) avec le voxy.json par defaut integre :
+le bug n'est plus reproductible de maniere detectable. Soit il a ete corrige indirectement
+par les fixes d'integration Iris, soit il est suffisamment mitige pour ne pas etre genant.
+
+**A ne rouvrir qu'en dernier recours** si des utilisateurs rapportent des symptomes specifiques
+(flickers, trous de rendu correles au streaming LOD actif) avec un shader pack particulier.
 
 ### 3.3 Binding points hardcodes (Iris)
 
@@ -97,33 +102,27 @@ Dans `IrisVoxyRenderPipeline.java` :
 
 ### Priorite HAUTE (bloquant pour un mod fonctionnel)
 
-1. **Fixer le streaming LOD + Iris**
-   - Le rendu Iris casse quand le streaming LOD continu est actif
-   - C'est le bug #1 a resoudre pour que le mod soit utilisable
+1. ~~**Fixer le streaming LOD + Iris**~~ [MITIGE / NON REPRODUIT 2026-04-16 — voir section 3.2]
 
 2. ~~**Nettoyer les mixins incohérents**~~ [FAIT 2026-04-16]
 
 3. ~~**Fixer la compression ZSTD**~~ [FAIT 2026-04-16]
 
-4. **Prérequis environnement : Java 21**
-   - Le projet cible Java 21 (`options.release = 21`)
-   - L'environnement actuel est en Java 17
-   - **Il faut installer Java 21 pour pouvoir compiler et tester**
+4. ~~**Prérequis environnement : Java 21**~~ [FAIT — Java 21 installe, build OK]
+
+5. ~~**Porter les mixins desactives**~~ [FAIT 2026-04-16 — MixinBlockableEventLoop + MixinGlDebug]
+
+6. ~~**voxy.json par defaut integre**~~ [FAIT 2026-04-16 — fallback classpath pour packs sans integration]
 
 ### Priorite MOYENNE (amelioration significative)
 
-5. **Natives multi-plateforme**
-   - `build.gradle` ne bundle que les natives Windows + Linux
-   - Pas de support macOS (`natives-macos` / `natives-macos-arm64`)
-   - `GPUSelectorWindows2.java` est specifique Windows (assembly x86-64)
+5. ~~**Natives multi-plateforme (macOS)**~~ [NON PLANIFIE — macOS hors scope, base utilisateurs quasi nulle]
 
 6. **Bobby mod support**
    - `MixinClientChunkCache.java` : `BOBBY_INSTALLED = false` hardcode
    - Le support Bobby est desactive mais le code est present
 
-7. **Porter les mixins desactives**
-   - `MixinBlockableEventLoop` : Gestion des erreurs de chargement (crash propre)
-   - `MixinGlDebug` : Debug OpenGL avec stack traces Voxy
+7. ~~**Porter les mixins desactives**~~ [FAIT 2026-04-16 — voir priorite HAUTE #5]
 
 8. **Optimisations de concurrence** (nombreux TODOs)
    - `MemoryStorageBackend` : Remplacer `synchronized` par `StampedLock`

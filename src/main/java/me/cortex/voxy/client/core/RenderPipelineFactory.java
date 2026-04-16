@@ -14,8 +14,6 @@ import java.util.function.BooleanSupplier;
 public class RenderPipelineFactory {
     public static AbstractRenderPipeline createPipeline(AsyncNodeManager nodeManager, NodeCleaner nodeCleaner,
             HierarchicalOcclusionTraverser traversal, BooleanSupplier frexSupplier) {
-        // Note this is where will choose/create e.g. IrisRenderPipeline or normal
-        // pipeline
         AbstractRenderPipeline pipeline = null;
         if (IrisUtil.IRIS_INSTALLED && IrisUtil.SHADER_SUPPORT) {
             pipeline = createIrisPipeline(nodeManager, nodeCleaner, traversal, frexSupplier);
@@ -37,11 +35,10 @@ public class RenderPipelineFactory {
             if (pipeData == null) {
                 return null;
             }
-            Logger.info("Creating voxy iris render pipeline");
             try {
                 return new IrisVoxyRenderPipeline(pipeData, nodeManager, nodeCleaner, traversal, frexSupplier);
             } catch (Exception e) {
-                Logger.error("Failed to create iris render pipeline", e);
+                Logger.error("Failed to create IrisVoxyRenderPipeline", e);
                 IrisUtil.disableIrisShaders();
                 return null;
             }

@@ -95,6 +95,7 @@ public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
             this.renderer = new VoxyRenderSystem(world, instance.getServiceManager());
         } catch (RuntimeException e) {
             if (IrisUtil.irisShaderPackEnabled()) {
+                Logger.error("VoxyRenderSystem ctor failed while shader pack enabled -- disabling shaders", e);
                 IrisUtil.disableIrisShaders();
             } else {
                 throw e;

@@ -11,7 +11,6 @@ import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.LightTexture;
 
 import org.joml.Matrix4f;
-import org.joml.Vector4f;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -40,7 +39,6 @@ public class MixinLevelRenderer {
         if (IrisUtil.irisShaderPackEnabled()) {
             var renderer = ((IGetVoxyRenderSystem) this).getVoxyRenderSystem();
             if (renderer != null) {
-                // Fixthe fucking viewport dims, fuck iris
                 glViewport(0, 0, Minecraft.getInstance().getMainRenderTarget().width,
                         Minecraft.getInstance().getMainRenderTarget().height);
 
