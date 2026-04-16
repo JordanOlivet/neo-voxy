@@ -3,6 +3,7 @@ package me.cortex.voxy.common.config.compressors;
 import me.cortex.voxy.common.config.ConfigBuildCtx;
 import me.cortex.voxy.common.util.MemoryBuffer;
 import me.cortex.voxy.common.util.ThreadLocalMemoryBuffer;
+import me.cortex.voxy.common.util.UnsafeUtil;
 import me.cortex.voxy.common.world.SaveLoadSystem;
 
 import static me.cortex.voxy.common.util.GlobalCleaner.CLEANER;
@@ -41,6 +42,11 @@ public class ZSTDCompressor implements StorageCompressor {
     public MemoryBuffer compress(MemoryBuffer saveData) {
         MemoryBuffer compressedData = new MemoryBuffer((int)ZSTD_COMPRESSBOUND(saveData.size));
         long compressedSize = nZSTD_compressCCtx(COMPRESSION_CTX.get().ptr, compressedData.address, compressedData.size, saveData.address, saveData.size, this.level);
+        if (ZSTD_isError(compressedSize)) {
+            compressedData.free();
+            throw new RuntimeException("ZSTD compression failed: " + ZSTD_getErrorName(compressedSize)
+                    + " (input size=" + saveData.size + ", level=" + this.level + ")");
+        }
         return compressedData.subSize(compressedSize);
     }
 
@@ -48,8 +54,23 @@ public class ZSTDCompressor implements StorageCompressor {
     public MemoryBuffer decompress(MemoryBuffer saveData) {
         var decompressed = SCRATCH.get().createUntrackedUnfreeableReference();
         long size = nZSTD_decompressDCtx(DECOMPRESSION_CTX.get().ptr, decompressed.address, decompressed.size, saveData.address, saveData.size);
-        //TODO:FIXME: DONT ASSUME IT DOESNT FAIL
+        if (ZSTD_isError(size)) {
+            me.cortex.voxy.common.Logger.warn("ZSTD decompression failed: " + ZSTD_getErrorName(size)
+                    + " (size=" + saveData.size + ", first bytes: " + formatFirstBytes(saveData) + ")");
+            return null;
+        }
         return decompressed.subSize(size);
+    }
+
+    private static String formatFirstBytes(MemoryBuffer data) {
+        StringBuilder sb = new StringBuilder();
+        int len = (int) Math.min(32, data.size);
+        for (int i = 0; i < len; i++) {
+            if (i > 0) sb.append(" ");
+            byte b = UnsafeUtil.memGetByte(data.address + i);
+            sb.append(String.format("%02X", b & 0xFF));
+        }
+        return sb.toString();
     }
 
     @Override

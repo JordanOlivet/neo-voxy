@@ -1,5 +1,5 @@
 plugins {
-    id 'dev.architectury.loom' version '1.7-SNAPSHOT'
+    id 'dev.architectury.loom' version '1.10-SNAPSHOT'
     id 'maven-publish'
     id "com.github.johnrengelman.shadow" version "8.1.1"
 }
@@ -67,8 +67,11 @@ dependencies {
     neoForge "net.neoforged:neoforge:${project.neoforge_version}"
 
     // Sodium for NeoForge (required dependency)
-    modCompileOnly "maven.modrinth:sodium:mc1.21.1-0.6.13-neoforge"
-    modRuntimeOnly "maven.modrinth:sodium:mc1.21.1-0.6.13-neoforge"
+    modImplementation "maven.modrinth:sodium:mc1.21.1-0.6.13-neoforge"
+    // Sodium's bundled JarJars (service + Fabric API renderer modules)
+    // Loom dev environment doesn't extract NeoForge JarJars at runtime, so add them explicitly
+    runtimeOnly fileTree(dir: "libs", include: "*.jar")
+    forgeRuntimeLibrary fileTree(dir: "libs", include: "*.jar")
 
     // Optional: Iris shaders support
     modCompileOnly("maven.modrinth:iris:1.8.0+1.21.1-neoforge")
