@@ -20,17 +20,37 @@ import java.util.List;
 import java.util.function.BooleanSupplier;
 
 import static org.lwjgl.opengl.GL11.GL_DEPTH_BUFFER_BIT;
+import static org.lwjgl.opengl.GL11.glGetInteger;
 import static org.lwjgl.opengl.GL30C.*;
+import static org.lwjgl.opengl.GL31.GL_MAX_UNIFORM_BUFFER_BINDINGS;
 import static org.lwjgl.opengl.GL31.GL_UNIFORM_BUFFER;
+import static org.lwjgl.opengl.GL43.GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS;
 import static org.lwjgl.opengl.GL45C.*;
 
 public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
+    // Binding-point allocation strategy
+    // ---------------------------------
+    // Iris, Sodium and shader packs all allocate bindings (UBO / SSBO / texture
+    // unit) bottom-up from index 0, so voxy allocates top-down from the GL
+    // context's reported maxima. This guarantees a conflict-free slice at the
+    // top of each namespace without needing to coordinate with any of them.
+    //
+    // Previous hardcoded values (UBO=5, SSBO base=10, sampler base=6) silently
+    // collided with gbuffer/shadowmap samplers on deferred packs.
+    private static final int VOXY_UBO_SLOTS = 1;
+
     private final IrisVoxyRenderPipelineData data;
     private final FullscreenBlit depthBlit = new FullscreenBlit("voxy:post/blit_texture_depth_cutout.frag");
     public final DepthFramebuffer fb = new DepthFramebuffer(GL_DEPTH24_STENCIL8);
     public final DepthFramebuffer fbTranslucent = new DepthFramebuffer(GL_DEPTH24_STENCIL8);
 
     private final GlBuffer shaderUniforms;
+
+    // Allocated once in the constructor from the current GL context's limits.
+    // -1 means the category is unused by this pipeline instance.
+    private final int uniformBindingPoint;
+    private final int ssboBindingBase;
+    private final int samplerBindingBase;
 
     public IrisVoxyRenderPipeline(IrisVoxyRenderPipelineData data, AsyncNodeManager nodeManager,
             NodeCleaner nodeCleaner, HierarchicalOcclusionTraverser traversal, BooleanSupplier frexSupplier) {
@@ -40,6 +60,17 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
             throw new IllegalStateException("Pipeline data already bound");
         }
         this.data.thePipeline = this;
+
+        this.uniformBindingPoint = allocateTopDown(
+                glGetInteger(GL_MAX_UNIFORM_BUFFER_BINDINGS), VOXY_UBO_SLOTS, "UBO");
+        this.ssboBindingBase = this.data.getSsboSet() != null
+                ? allocateTopDown(glGetInteger(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS),
+                        this.data.getSsboSet().count(), "SSBO")
+                : -1;
+        this.samplerBindingBase = this.data.getImageSet() != null
+                ? allocateTopDown(glGetInteger(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS),
+                        this.data.getImageSet().count(), "texture unit")
+                : -1;
 
         // Bind the drawbuffers
         var oDT = this.data.opaqueDrawTargets;
@@ -163,24 +194,23 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
 
     @Override
     public void bindUniforms() {
-        this.bindUniforms(UNIFORM_BINDING_POINT);
+        this.bindUniforms(this.uniformBindingPoint);
     }
 
     @Override
     public void bindUniforms(int bindingPoint) {
         if (this.shaderUniforms != null) {
-            GL30.glBindBufferBase(GL_UNIFORM_BUFFER, bindingPoint, this.shaderUniforms.id);// todo: dont randomly select
-                                                                                           // this to 5
+            GL30.glBindBufferBase(GL_UNIFORM_BUFFER, bindingPoint, this.shaderUniforms.id);
         }
     }
 
     private void doBindings() {
         this.bindUniforms();
         if (this.data.getSsboSet() != null) {
-            this.data.getSsboSet().bindingFunction().accept(10);
+            this.data.getSsboSet().bindingFunction().accept(this.ssboBindingBase);
         }
         if (this.data.getImageSet() != null) {
-            this.data.getImageSet().bindingFunction().accept(6);
+            this.data.getImageSet().bindingFunction().accept(this.samplerBindingBase);
         }
     }
 
@@ -205,24 +235,33 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
         super.addDebug(debug);
     }
 
-    private static final int UNIFORM_BINDING_POINT = 5;// TODO make ths binding point... not randomly 5
+    private static int allocateTopDown(int glLimit, int requiredCount, String category) {
+        int base = glLimit - requiredCount;
+        if (base < 0) {
+            throw new IllegalStateException(
+                    "Cannot allocate " + requiredCount + " " + category + " binding(s) top-down: "
+                            + "GL context reports only " + glLimit + " available");
+        }
+        return base;
+    }
 
     private StringBuilder buildGenericShaderHeader(AbstractSectionRenderer<?, ?> renderer, String input) {
         StringBuilder builder = new StringBuilder(input).append("\n\n\n");
 
         if (this.data.getUniforms() != null) {
-            builder.append("layout(binding = " + UNIFORM_BINDING_POINT + ", std140) uniform ShaderUniformBindings ")
+            builder.append("layout(binding = ").append(this.uniformBindingPoint)
+                    .append(", std140) uniform ShaderUniformBindings ")
                     .append(this.data.getUniforms().layout())
                     .append(";\n\n");
         }
 
         if (this.data.getSsboSet() != null) {
-            builder.append("#define BUFFER_BINDING_INDEX_BASE 10\n");// TODO: DONT RANDOMLY MAKE THIS 10
+            builder.append("#define BUFFER_BINDING_INDEX_BASE ").append(this.ssboBindingBase).append("\n");
             builder.append(this.data.getSsboSet().layout()).append("\n\n");
         }
 
         if (this.data.getImageSet() != null) {
-            builder.append("#define BASE_SAMPLER_BINDING_INDEX 6\n");// TODO: DONT RANDOMLY MAKE THIS 6
+            builder.append("#define BASE_SAMPLER_BINDING_INDEX ").append(this.samplerBindingBase).append("\n");
             builder.append(this.data.getImageSet().layout()).append("\n\n");
         }
 
@@ -250,7 +289,7 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
 
     @Override
     public String taaFunction(String functionName) {
-        return this.taaFunction(UNIFORM_BINDING_POINT, functionName);
+        return this.taaFunction(this.uniformBindingPoint, functionName);
     }
 
     @Override
