@@ -51,8 +51,19 @@ public class RocksDBStorageBackend extends StorageBackend {
          */
         RocksDB.loadLibrary();
 
-        // TODO: FIXME: DONT USE THE SAME options PER COLUMN FAMILY
-        final ColumnFamilyOptions cfOpts = new ColumnFamilyOptions()
+        // Each column family owns its own ColumnFamilyOptions instance so they can be
+        // tuned independently and so closing them follows a clean 1:1 ownership model.
+        //
+        // - DEFAULT: required by RocksDB but unused by voxy. Keep minimal.
+        // - world_sections: the bulk of the data. Already-compressed payloads, lots of
+        //   point lookups by section key -> NO_COMPRESSION + point-lookup optimisation
+        //   + block cache + bloom filter.
+        // - id_mappings: a small dense table of block-state-id -> serialised data.
+        //   ZSTD compression + small-db optimisation.
+        final ColumnFamilyOptions cfDefaultOpts = new ColumnFamilyOptions()
+                .optimizeForSmallDb();
+
+        final ColumnFamilyOptions cfIdMappingsOpts = new ColumnFamilyOptions()
                 .setCompressionType(CompressionType.ZSTD_COMPRESSION)
                 .optimizeForSmallDb();
 
@@ -73,9 +84,9 @@ public class RocksDBStorageBackend extends StorageBackend {
                 .setFilterPolicy(filter));
 
         final List<ColumnFamilyDescriptor> cfDescriptors = Arrays.asList(
-                new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY, cfOpts),
+                new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY, cfDefaultOpts),
                 new ColumnFamilyDescriptor("world_sections".getBytes(), cfWorldSecOpts),
-                new ColumnFamilyDescriptor("id_mappings".getBytes(), cfOpts));
+                new ColumnFamilyDescriptor("id_mappings".getBytes(), cfIdMappingsOpts));
 
         final DBOptions options = new DBOptions()
                 // .setUnorderedWrite(true)
@@ -98,7 +109,8 @@ public class RocksDBStorageBackend extends StorageBackend {
             this.closeList.addAll(handles);
             this.closeList.add(this.db);
             this.closeList.add(options);
-            this.closeList.add(cfOpts);
+            this.closeList.add(cfDefaultOpts);
+            this.closeList.add(cfIdMappingsOpts);
             this.closeList.add(cfWorldSecOpts);
             this.closeList.add(this.sectionReadOps);
             this.closeList.add(this.sectionWriteOps);
