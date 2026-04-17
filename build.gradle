@@ -136,4 +136,19 @@ dependencies {
     compileOnly 'org.lz4:lz4-java:1.8.0'
     bundle(implementation('org.tukaani:xz:1.10')) { transitive = false }
     forgeRuntimeLibrary 'org.tukaani:xz:1.10'
+
+    // Test dependencies
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testImplementation 'org.lz4:lz4-java:1.8.0'
+    testRuntimeOnly "org.lwjgl:lwjgl:$lwjglVersion:natives-windows"
+    testRuntimeOnly "org.lwjgl:lwjgl:$lwjglVersion:natives-linux"
+    testRuntimeOnly "org.lwjgl:lwjgl-zstd:$lwjglVersion:natives-windows"
+    testRuntimeOnly "org.lwjgl:lwjgl-zstd:$lwjglVersion:natives-linux"
+    testRuntimeOnly "org.lwjgl:lwjgl-lmdb:$lwjglVersion:natives-windows"
+    testRuntimeOnly "org.lwjgl:lwjgl-lmdb:$lwjglVersion:natives-linux"
+}
+
+test {
+    useJUnitPlatform()
 }

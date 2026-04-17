@@ -91,10 +91,11 @@ Dans `IrisVoxyRenderPipeline.java` :
 - `decompress()` : log warn avec le nom de l'erreur ZSTD + dump hex des premiers octets, return `null` (pattern cohérent avec `LZ4Compressor`)
 - Les appelants (`CompressionStorageAdaptor`, `SectionSerializationStorage`) gèrent déjà `null` = "section absente, à régénérer"
 
-### 3.5 RocksDB configuration
+### 3.5 RocksDB configuration [RÉSOLU 2026-04-17]
 
-`RocksDBStorageBackend.java` : `TODO: UPDATE THIS` avec une exception
-- Les options de column family ne sont pas differenciees
+`RocksDBStorageBackend.java` : options column family désormais séparées par CF
+(DEFAULT / world_sections / id_mappings), fermeture propre, code mort
+(`swizzlePos`) supprimé.
 
 ---
 
@@ -118,20 +119,17 @@ Dans `IrisVoxyRenderPipeline.java` :
 
 5. ~~**Natives multi-plateforme (macOS)**~~ [NON PLANIFIE — macOS hors scope, base utilisateurs quasi nulle]
 
-6. **Bobby mod support**
-   - `MixinClientChunkCache.java` : `BOBBY_INSTALLED = false` hardcode
-   - Le support Bobby est desactive mais le code est present
+6. ~~**Bobby mod support**~~ [FAIT 2026-04-17 — `ModLoaderUtil.isModLoaded("bobby")`]
 
 7. ~~**Porter les mixins desactives**~~ [FAIT 2026-04-16 — voir priorite HAUTE #5]
 
 8. **Optimisations de concurrence** (nombreux TODOs)
-   - `MemoryStorageBackend` : Remplacer `synchronized` par `StampedLock`
-   - `Mapper.java` : Implementer une HashMap lock-free
+   - `Mapper.java` : 6 TODOs (ligne 226 lock-free, 421/437 synchronisation)
    - `AllocationArena.java` : AVL tree custom sans allocations
    - `HierarchicalBitSet.java` : Operations bitset lentes
 
-9. **Configuration des binding points Iris**
-   - Rendre les indices configurables ou les deduire du shader pack
+9. ~~**Configuration des binding points Iris**~~ [FAIT 2026-04-17 — allocation top-down,
+   collision-free sans coordination, constantes documentées]
 
 ### Priorite BASSE (fonctionnalités additionnelles)
 
@@ -148,9 +146,29 @@ Dans `IrisVoxyRenderPipeline.java` :
     - `WorldImporter.java` : Upgrade NBT format avec DataFixerUpper
     - `DHImporter.java` : Import Distant Horizons (3 TODOs)
 
-13. **Tests**
-    - Aucun test unitaire ou d'integration
-    - Le README note "Testing: Not Done Rigorously"
+13. **Tests** [EN COURS 2026-04-17]
+    - 173 tests JUnit sur 24 classes :
+      - **Encoding / bit math** : `SaveLoadSystemTest`, `SaveLoadSystem3Test`,
+        `WorldEngineKeyTest`, `MapperBitsTest`
+      - **Sérialisation sections** : `SaveLoadRoundTripTest`, `SaveLoadSystem3Test`,
+        `SectionSerializerTest` (GZIP + header)
+      - **Compression** : `LZ4CompressorTest`, `ZSTDCompressorTest`
+      - **Backends stockage** : `MemoryStorageBackendTest`, `LMDBStorageBackendTest`,
+        `RocksDBStorageBackendTest` (avec @TempDir pour persistance)
+      - **Adaptateurs stockage** : `CompressionStorageAdaptorTest`,
+        `ReadonlyCachingLayerTest`, `FragmentedStorageBackendAdaptorTest`
+      - **Structures natives** : `HierarchicalBitSetTest`, `AllocationArenaTest`,
+        `MemoryBufferTest`, `UnsafeUtilTest`
+      - **Réseau** : `BloomFilterTest` (false-positive rate, serialization),
+        `SharedBandwidthLimitTest` (fair sharing)
+      - **Utilitaires** : `PairTest`, `MessageQueueTest`,
+        `ByteBufferBackedInputStreamTest`
+      - **WorldSection** : `WorldSectionTest` (getIndex/getChildIndex, set,
+        copyData, nonEmptyBlockCount, updateLvl0State)
+    - Ont capturé un bug réel dans `LZ4Compressor.decompress` (taille retournée incorrecte)
+    - Reste à couvrir : Redis backend (nécessite infra), compression XZ (pas de wrapper),
+      chemins d'ingestion, pipeline de rendu, classes dépendantes de Mapper
+      (`IdRemapper` nécessite `Blocks.AIR.defaultBlockState()` = runtime Minecraft)
 
 ---
 
