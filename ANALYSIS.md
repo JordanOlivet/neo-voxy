@@ -123,10 +123,17 @@ Dans `IrisVoxyRenderPipeline.java` :
 
 7. ~~**Porter les mixins desactives**~~ [FAIT 2026-04-16 — voir priorite HAUTE #5]
 
-8. **Optimisations de concurrence** (nombreux TODOs)
-   - `Mapper.java` : 6 TODOs (ligne 226 lock-free, 421/437 synchronisation)
-   - `AllocationArena.java` : AVL tree custom sans allocations
-   - `HierarchicalBitSet.java` : Operations bitset lentes
+8. **Optimisations de concurrence** [PARTIEL 2026-04-17 — correctness-first]
+   - FAIT : `Mapper.java` — `ObjectArrayList` remplacés par volatile snapshots copy-on-write,
+     lectures désormais lock-free (TODOs 226/421/437 résolus).
+   - FAIT : `AllocationArena.java` — layout élargi à 32/32 bits (max bloc 4 GB), `checkSize`
+     fail-fast au lieu de corruption silencieuse (FIXME L.5 résolu).
+   - FAIT : `ActiveSectionTracker.java` — timeout sur le spin-wait (warn 10s, throw 60s) avec
+     seuils réglables pour les tests. Partie "jump back to service" du TODO L.177 conservée.
+   - REPORTE : `MemoryStorageBackend` StampedLock (perf), `HierarchicalBitSet` (latence
+     intra-thread), `AllocationArena` (AVL custom, alignment, FIXME merge addr=0),
+     `ActiveSectionTracker` (VolatileHolder, cache global, thread check). TODOs préservés.
+   - Tests ajoutés : `AllocationArenaLimitsTest` (3), `ActiveSectionTrackerTimeoutTest` (1).
 
 9. ~~**Configuration des binding points Iris**~~ [FAIT 2026-04-17 — allocation top-down,
    collision-free sans coordination, constantes documentées]
@@ -142,12 +149,30 @@ Dans `IrisVoxyRenderPipeline.java` :
     - `ModelFactory.java` : 28 TODOs sur la transparence, occlusion, modeles de blocs
     - `RenderDataFactory.java` : 39 TODOs sur la generation de geometrie et l'eclairage
 
+14. **Artefact grille sur eau LOD** [IDENTIFIE 2026-04-17 — non résolu]
+    - Symptôme : quadrillage régulier visible sur toute la surface des lacs en rendu LOD,
+      disparaît dès qu'on entre dans la render distance vanilla. Espacement aligné sur
+      les frontières de sections meshées (multiples de 32 blocs).
+    - Cause : double coupure au niveau du meshing fluide —
+      (a) UVs locales par quad (`quads2.vert:108-111`) → la texture d'eau reset à chaque
+          jointure de quad/section au lieu de tiler en espace monde ;
+      (b) éclairage per-quad (`RenderDataFactory.java:564`) → saut de luminosité entre
+          quads adjacents au lieu d'interpolation per-vertex.
+    - Fix envisagé : passer en lighting per-vertex pour les fluides (4 ids au lieu de 1,
+      impact vertex format) + UVs en world-space côté shader. 2-3× la taille de la passe
+      concurrence, inconnue sur les bits restants dans le vertex format, risque de
+      régression côté Iris.
+    - Note secondaire : `Mipper.mip()` (L.31-54) choisit le voxel enfant avec la plus
+      haute opacité → l'eau (opacity 0) perd systématiquement contre tout solide. Crée
+      de petits îlots flottants aux rives (moins visible que la grille). Fix : majority-vote
+      avec eau préférée en cas de parité, ~30 lignes dans `Mipper.java`.
+
 12. **Import de monde**
     - `WorldImporter.java` : Upgrade NBT format avec DataFixerUpper
     - `DHImporter.java` : Import Distant Horizons (3 TODOs)
 
 13. **Tests** [EN COURS 2026-04-17]
-    - 173 tests JUnit sur 24 classes :
+    - 177 tests JUnit sur 26 classes (173 + 4 de la passe concurrence) :
       - **Encoding / bit math** : `SaveLoadSystemTest`, `SaveLoadSystem3Test`,
         `WorldEngineKeyTest`, `MapperBitsTest`
       - **Sérialisation sections** : `SaveLoadRoundTripTest`, `SaveLoadSystem3Test`,

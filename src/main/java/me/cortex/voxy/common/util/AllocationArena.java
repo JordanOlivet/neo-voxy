@@ -2,16 +2,17 @@ package me.cortex.voxy.common.util;
 
 import it.unimi.dsi.fastutil.longs.LongRBTreeSet;
 
-//FIXME: NOTE: if there is a free block of size > 2^30 EVERYTHING BREAKS, need to either increase size
-// or automatically split and manage multiple blocks which is very painful
-//OR instead of addr, defer to a long[] and use indicies
+// Resolved (2026-04-17): SIZE_BITS widened to 32 (max block 4 GB) and fail-fast added when a free/taken
+// block size would exceed SIZE_MSK. Max arena now 4 GB (was 512 GB) — ample for GPU geometry heaps.
+// Original note for context: previously with SIZE_BITS=30 a merged free block > 2^30 silently corrupted
+// the bit-packed (addr|size) slot.
 
 //TODO: replace the LongAVLTreeSet with a custom implementation that doesnt cause allocations when searching
 // and see if something like a RBTree is any better
 public class AllocationArena {
     public static final long SIZE_LIMIT = -1;
 
-    private static final int ADDR_BITS = 34;//This gives max size per allocation of 2^30 and max address of 2^39
+    private static final int ADDR_BITS = 32;//32/32 split: max block 2^32 and max address 2^32
     private static final int SIZE_BITS = 64 - ADDR_BITS;
     private static final long SIZE_MSK = (1L<<SIZE_BITS)-1;
     private static final long ADDR_MSK = (1L<<ADDR_BITS)-1;
@@ -42,6 +43,16 @@ public class AllocationArena {
         return this.totalSize;
     }
 
+    // Package-private for tests; max representable block size.
+    static final long MAX_BLOCK_SIZE = SIZE_MSK;
+
+    static void checkSize(long size) {
+        if (size < 0 || size > SIZE_MSK) {
+            throw new IllegalStateException("AllocationArena block size overflow: " + size
+                    + " > SIZE_MSK=" + SIZE_MSK + ". Arena layout cannot represent this block.");
+        }
+    }
+
 
     public int numFreeBlocks() {
         return this.FREE.size();
@@ -61,6 +72,7 @@ public class AllocationArena {
 
     public long alloc(int size) {//TODO: add alignment support
         if (size == 0) throw new IllegalArgumentException();
+        checkSize(size);
         //This is stupid, iterator is not inclusive
         var iter = this.FREE.iterator(((long) size << ADDR_BITS)-1);
         if (!iter.hasNext()) {//No free space for allocation
@@ -136,6 +148,7 @@ public class AllocationArena {
 
         //this.resized = false;
         //Need to swap around the slot to be in FREE format
+        checkSize(slot & SIZE_MSK);
         slot = (slot>>>SIZE_BITS) | (slot<<ADDR_BITS);
         this.FREE.add(slot);//Add the free slot into segments
         return (int) size;

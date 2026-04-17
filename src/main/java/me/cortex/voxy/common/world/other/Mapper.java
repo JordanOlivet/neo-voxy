@@ -1,7 +1,6 @@
 package me.cortex.voxy.common.world.other;
 
 import com.mojang.serialization.Dynamic;
-import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.config.IMappingStorage;
 import me.cortex.voxy.common.util.Pair;
@@ -24,6 +23,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Random;
@@ -43,11 +43,13 @@ public class Mapper {
 
     private final ReentrantLock blockLock = new ReentrantLock();
     private final ConcurrentHashMap<BlockState, StateEntry> block2stateEntry = new ConcurrentHashMap<>(2000, 0.75f, 10);
-    private final ObjectArrayList<StateEntry> blockId2stateEntry = new ObjectArrayList<>();
+    // Copy-on-write snapshot indexed by id. Writes take blockLock; reads are lock-free via volatile publish.
+    private volatile StateEntry[] blockId2stateEntry = new StateEntry[0];
 
     private final ReentrantLock biomeLock = new ReentrantLock();
     private final ConcurrentHashMap<String, BiomeEntry> biome2biomeEntry = new ConcurrentHashMap<>(2000, 0.75f, 10);
-    private final ObjectArrayList<BiomeEntry> biomeId2biomeEntry = new ObjectArrayList<>();
+    // Copy-on-write snapshot indexed by id. Writes take biomeLock; reads are lock-free via volatile publish.
+    private volatile BiomeEntry[] biomeId2biomeEntry = new BiomeEntry[0];
 
     private Consumer<StateEntry> newStateCallback;
     private Consumer<BiomeEntry> newBiomeCallback;
@@ -57,7 +59,7 @@ public class Mapper {
         // Insert air since its a special entry (index 0)
         var airEntry = new StateEntry(0, Blocks.AIR.defaultBlockState());
         this.block2stateEntry.put(airEntry.state, airEntry);
-        this.blockId2stateEntry.add(airEntry);
+        this.blockId2stateEntry = new StateEntry[] { airEntry };
 
         this.loadFromStorage();
     }
@@ -154,21 +156,29 @@ public class Mapper {
             }
         }
 
-        // Insert into the arrays
-        sentries.stream().sorted(Comparator.comparing(a -> a.id)).forEach(entry -> {
-            if (this.blockId2stateEntry.size() != entry.id) {
+        // Build up new snapshots off-heap then publish each with one volatile write.
+        sentries.sort(Comparator.comparing(a -> a.id));
+        StateEntry[] blockSnap = Arrays.copyOf(this.blockId2stateEntry, this.blockId2stateEntry.length + sentries.size());
+        int blockPos = this.blockId2stateEntry.length;
+        for (var entry : sentries) {
+            if (blockPos != entry.id) {
                 throw new IllegalStateException("Block entry not ordered");
             }
-            this.blockId2stateEntry.add(entry);
-        });
+            blockSnap[blockPos++] = entry;
+        }
+        this.blockId2stateEntry = blockSnap;
 
-        bentries.stream().sorted(Comparator.comparing(a -> a.id)).forEach(entry -> {
-            if (this.biomeId2biomeEntry.size() != entry.id) {
+        bentries.sort(Comparator.comparing(a -> a.id));
+        BiomeEntry[] biomeSnap = Arrays.copyOf(this.biomeId2biomeEntry, this.biomeId2biomeEntry.length + bentries.size());
+        int biomePos = this.biomeId2biomeEntry.length;
+        for (var entry : bentries) {
+            if (biomePos != entry.id) {
                 throw new IllegalStateException("Biome entry not ordered. got " + entry.biome + " with id " + entry.id
-                        + " expected id " + this.biomeId2biomeEntry.size());
+                        + " expected id " + biomePos);
             }
-            this.biomeId2biomeEntry.add(entry);
-        });
+            biomeSnap[biomePos++] = entry;
+        }
+        this.biomeId2biomeEntry = biomeSnap;
 
         if (forceResave[0]) {
             Logger.warn("Forced state resave triggered");
@@ -177,7 +187,7 @@ public class Mapper {
     }
 
     public final int getBlockStateCount() {
-        return this.blockId2stateEntry.size();
+        return this.blockId2stateEntry.length;
     }
 
     private StateEntry registerNewBlockState(BlockState state) {
@@ -188,9 +198,12 @@ public class Mapper {
             return entry;
         }
 
-        entry = new StateEntry(this.blockId2stateEntry.size(), state);
+        StateEntry[] prev = this.blockId2stateEntry;
+        entry = new StateEntry(prev.length, state);
+        StateEntry[] next = Arrays.copyOf(prev, prev.length + 1);
+        next[prev.length] = entry;
         this.block2stateEntry.put(state, entry);
-        this.blockId2stateEntry.add(entry);
+        this.blockId2stateEntry = next; // volatile publish — makes entry visible to lock-free readers
         this.blockLock.unlock();
 
         byte[] serialized = entry.serialize();
@@ -209,9 +222,12 @@ public class Mapper {
             this.biomeLock.unlock();
             return entry;
         }
-        entry = new BiomeEntry(this.biomeId2biomeEntry.size(), biome);
+        BiomeEntry[] prev = this.biomeId2biomeEntry;
+        entry = new BiomeEntry(prev.length, biome);
+        BiomeEntry[] next = Arrays.copyOf(prev, prev.length + 1);
+        next[prev.length] = entry;
         this.biome2biomeEntry.put(biome, entry);
-        this.biomeId2biomeEntry.add(entry);
+        this.biomeId2biomeEntry = next; // volatile publish
         this.biomeLock.unlock();
 
         byte[] serialized = entry.serialize();
@@ -223,8 +239,8 @@ public class Mapper {
         return entry;
     }
 
-    // TODO:FIXME: IS VERY SLOW NEED TO MAKE IT LOCK FREE, or at minimum use a
-    // concurrent map
+    // Steady-state getBaseId is lock-free: ConcurrentHashMap lookup + volatile snapshot read.
+    // Discovery path takes blockLock/biomeLock once per new state — acceptable.
     public long getBaseId(byte light, BlockState state, Holder<Biome> biome) {
         if (state.isAir())
             return Byte.toUnsignedLong(light) << 56;// Special case and fast return for air, dont care about the biome
@@ -232,7 +248,7 @@ public class Mapper {
     }
 
     public BlockState getBlockStateFromBlockId(int blockId) {
-        return this.blockId2stateEntry.get(blockId).state;
+        return this.blockId2stateEntry[blockId].state;
     }
 
     // TODO: replace lambda with a class cached lambda ref (cause doing this:: still
@@ -253,7 +269,7 @@ public class Mapper {
     }
 
     public int getBlockStateOpacity(int blockId) {
-        return this.blockId2stateEntry.get(blockId).opacity;
+        return this.blockId2stateEntry[blockId].opacity;
     }
 
     public int getIdForBiome(Holder<Biome> biome) {
@@ -418,49 +434,46 @@ public class Mapper {
                 | (Integer.toUnsignedLong(blockId) << 27);
     }
 
-    // TODO: fixme: synchronize access to this.blockId2stateEntry
+    // Resolved (2026-04-17): list replaced by volatile StateEntry[] snapshot — read is lock-free.
     public StateEntry[] getStateEntries() {
-        this.blockLock.lock();
-        var set = new ArrayList<>(this.blockId2stateEntry);
-        StateEntry[] out = new StateEntry[set.size()];
-        int i = 0;
-        for (var entry : set) {
-            if (entry.id != i++) {
+        StateEntry[] snap = this.blockId2stateEntry;
+        StateEntry[] out = new StateEntry[snap.length];
+        for (int i = 0; i < snap.length; i++) {
+            var entry = snap[i];
+            if (entry.id != i) {
                 throw new IllegalStateException();
             }
-            out[i - 1] = entry;
+            out[i] = entry;
         }
-        this.blockLock.unlock();
         return out;
     }
 
-    // TODO: fixme: synchronize access to this.biomeId2biomeEntry
+    // Resolved (2026-04-17): list replaced by volatile BiomeEntry[] snapshot — read is lock-free.
     public BiomeEntry[] getBiomeEntries() {
-        this.biomeLock.lock();
-        var set = new ArrayList<>(this.biomeId2biomeEntry);
-        BiomeEntry[] out = new BiomeEntry[set.size()];
-        int i = 0;
-        for (var entry : set) {
-            if (entry.id != i++) {
+        BiomeEntry[] snap = this.biomeId2biomeEntry;
+        BiomeEntry[] out = new BiomeEntry[snap.length];
+        for (int i = 0; i < snap.length; i++) {
+            var entry = snap[i];
+            if (entry.id != i) {
                 throw new IllegalStateException();
             }
-            out[i - 1] = entry;
+            out[i] = entry;
         }
-        this.biomeLock.unlock();
         return out;
     }
 
     public void forceResaveStates() {
         var blocks = new ArrayList<>(this.block2stateEntry.values());
         var biomes = new ArrayList<>(this.biome2biomeEntry.values());
+        StateEntry[] blockSnap = this.blockId2stateEntry;
+        BiomeEntry[] biomeSnap = this.biomeId2biomeEntry;
 
         for (var entry : blocks) {
             if (entry.state.isAir() && entry.id == 0) {
                 continue;
             }
-            if (this.blockId2stateEntry.indexOf(entry) != entry.id) {
-                throw new IllegalStateException("State Id NOT THE SAME, very critically bad. arr:"
-                        + this.blockId2stateEntry.indexOf(entry) + " entry: " + entry.id);
+            if (entry.id >= blockSnap.length || blockSnap[entry.id] != entry) {
+                throw new IllegalStateException("State Id NOT THE SAME, very critically bad. entry: " + entry.id);
             }
             byte[] serialized = entry.serialize();
             ByteBuffer buffer = ByteBuffer.wrap(serialized);
@@ -468,7 +481,7 @@ public class Mapper {
         }
 
         for (var entry : biomes) {
-            if (this.biomeId2biomeEntry.indexOf(entry) != entry.id) {
+            if (entry.id >= biomeSnap.length || biomeSnap[entry.id] != entry) {
                 throw new IllegalStateException("Biome Id NOT THE SAME, very critically bad");
             }
 
