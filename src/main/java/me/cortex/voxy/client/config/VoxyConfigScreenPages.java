@@ -125,9 +125,9 @@ public abstract class VoxyConfigScreenPages {
                 .add(OptionImpl.createBuilder(int.class, storage)
                         .setName(Component.translatable("voxy.config.general.renderDistance"))
                         .setTooltip(Component.translatable("voxy.config.general.renderDistance.tooltip"))
-                        .setControl(opt -> new SliderControl(opt, 2, 64, 1,
+                        .setControl(opt -> new SliderControl(opt, 2, 128, 1,
                                 v -> Component.literal(Integer.toString(v * 32))))// Every unit is equal to 32 vanilla
-                                                                                  // chunks
+                                                                                  // chunks. Max 128 = 4096 chunks (~65 km).
                         .setBinding((s, v) -> {
                             s.sectionRenderDistance = v;
                             var vrsh = (IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer;

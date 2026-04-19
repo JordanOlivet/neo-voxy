@@ -40,3 +40,6 @@ config="voxy.mixins.json"
 
 [[mixins]]
 config="voxy-common.mixins.json"
+
+[[mixins]]
+config="voxy-chunky.mixins.json"
