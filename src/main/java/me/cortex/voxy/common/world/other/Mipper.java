@@ -70,10 +70,14 @@ public class Mipper {
                     (Mapper.getLightId(I100) & 0xF0) + (Mapper.getLightId(I101) & 0xF0) + (Mapper.getLightId(I110) & 0xF0) + (Mapper.getLightId(I111) & 0xF0);
             int skyLight = (Mapper.getLightId(I000) & 0x0F) + (Mapper.getLightId(I001) & 0x0F) + (Mapper.getLightId(I010) & 0x0F) + (Mapper.getLightId(I011) & 0x0F) +
                     (Mapper.getLightId(I100) & 0x0F) + (Mapper.getLightId(I101) & 0x0F) + (Mapper.getLightId(I110) & 0x0F) + (Mapper.getLightId(I111) & 0x0F);
+            // Resolved (2026-04-19): blockLight is summed with `& 0xF0` so each term is already
+            // at the high-nibble position; after /8 it is still high-nibble-aligned. The previous
+            // `<< 4` over-shifted past the byte and withLight() masked the bits away, silently
+            // zeroing the block-light component for air mips.
             blockLight = blockLight / 8;
             skyLight = (int) Math.ceil((double) skyLight / 8);
 
-            return withLight(I111, (blockLight << 4) | skyLight);
+            return withLight(I111, blockLight | skyLight);
         }
     }
 }

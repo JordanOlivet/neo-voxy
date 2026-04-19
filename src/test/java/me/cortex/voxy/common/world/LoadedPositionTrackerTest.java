@@ -8,6 +8,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -38,8 +39,6 @@ class LoadedPositionTrackerTest {
 
     @Test
     void zeroKeyUsesLockFreeSpecialSlot() {
-        // The "zero key" path triggers when mix(loc) == 0; mix(0) == 0, so passing 0 hits it.
-        // This is the only path in getSecOrMakeLoader that currently works (see bug below).
         AtomicInteger calls = new AtomicInteger();
         LoadedPositionTracker tracker = new LoadedPositionTracker(() -> {
             calls.incrementAndGet();
@@ -68,26 +67,54 @@ class LoadedPositionTrackerTest {
     }
 
     @Test
-    void getOrMakeForNonZeroKeyThrowsDueToInvertedNullCheck() {
-        // Documents a bug in LoadedPositionTracker.getSecOrMakeLoader (non-zero-key branch):
-        //
-        //     if (pos < 0) {
-        //         pos = -pos-1;
-        //         // No entry found but we have acquired a write location
-        //         if (this.value[pos] == null) {
-        //             throw new IllegalStateException();   // ← inverted: throws on the
-        //                                                   //   normal first-insert path
-        //         }
-        //         Object val = this.value[pos] = this.factory.get();
-        //         ...
-        //
-        // The check fires every time a fresh slot is claimed, so any first insert of
-        // a key whose mix() != 0 explodes. The class is therefore only usable today
-        // through its zero-key fast path.
-        //
-        // Pin the current behavior so the test breaks (and forces re-evaluation) once
-        // the bug is fixed.
+    void getOrMakeStoresFactoryResultForNonZeroKey() {
+        AtomicInteger calls = new AtomicInteger();
+        LoadedPositionTracker tracker = new LoadedPositionTracker(() -> {
+            calls.incrementAndGet();
+            return "X";
+        });
+        long key = 0xDEADBEEFL;
+        Object first = tracker.getSecOrMakeLoader(key);
+        Object second = tracker.getSecOrMakeLoader(key);
+        assertSame(first, second, "second call must return the same instance");
+        assertEquals(1, calls.get(), "factory must be invoked exactly once for the same key");
+    }
+
+    @Test
+    void distinctNonZeroKeysGetDistinctValues() {
+        AtomicInteger n = new AtomicInteger();
+        LoadedPositionTracker tracker = new LoadedPositionTracker(() ->
+                "value-" + n.incrementAndGet());
+        Object a = tracker.getSecOrMakeLoader(1);
+        Object b = tracker.getSecOrMakeLoader(2);
+        Object c = tracker.getSecOrMakeLoader(3);
+        assertNotEquals(a, b);
+        assertNotEquals(b, c);
+        assertNotEquals(a, c);
+    }
+
+    @Test
+    void exchangeReturnsOldValueForNonZeroKey() {
         LoadedPositionTracker tracker = new LoadedPositionTracker(Object::new);
-        assertThrows(IllegalStateException.class, () -> tracker.getSecOrMakeLoader(0xDEADBEEFL));
+        long key = 0xFEEDL;
+        Object first = tracker.getSecOrMakeLoader(key);
+        Object replacement = new Object();
+        Object returned = tracker.exchange(key, replacement);
+        assertSame(first, returned);
+        assertSame(replacement, tracker.getSecOrMakeLoader(key));
+    }
+
+    @Test
+    void manyKeysFitWithinDefaultCapacity() {
+        // Default size=12 → 4096 slots. 1000 keys should comfortably fit and round-trip.
+        LoadedPositionTracker tracker = new LoadedPositionTracker(Object::new);
+        Object[] expected = new Object[1000];
+        for (int i = 1; i <= 1000; i++) {
+            expected[i - 1] = tracker.getSecOrMakeLoader(i);
+        }
+        for (int i = 1; i <= 1000; i++) {
+            assertSame(expected[i - 1], tracker.getSecOrMakeLoader(i),
+                    "key " + i + " must round-trip");
+        }
     }
 }

@@ -22,7 +22,7 @@ Le mod reste **instable** avec des fonctionnalites partiellement fonctionnelles.
 | Integration Iris | 75% | Fonctionne mais binding points hardcodes |
 | Integration Sodium | 85% | Mixins en place, fonctionnel |
 | Stockage (backends) | 70% | LMDB/RocksDB fonctionnels, TODOs sur le locking |
-| Tests | 45% | 324 tests sur 43 classes (encoding, stockage, structures natives, réseau, util, config build, section lifecycle, section storage, paths config, voxelization, thread, voxel mipper, IdRemapper, ScanMesher2D, ring utils, allocation list, position tracker) |
+| Tests | 45% | 329 tests sur 43 classes (encoding, stockage, structures natives, réseau, util, config build, section lifecycle, section storage, paths config, voxelization, thread, voxel mipper, IdRemapper, ScanMesher2D, ring utils, allocation list, position tracker) |
 | Stabilite generale | 65% | Concurrence correctness fixée, intégrations Chunky/import propres |
 
 ---
@@ -188,7 +188,7 @@ Dans `IrisVoxyRenderPipeline.java` :
       cap arena (4 G éléments — voir notes dans `AllocationArena`).
 
 13. **Tests** [EN COURS 2026-04-19]
-    - 324 tests JUnit sur 43 classes (242 → 324, +82 ajoutés 2026-04-19) :
+    - 329 tests JUnit sur 43 classes (242 → 329, +87 ajoutés 2026-04-19) :
       - **Encoding / bit math** : `SaveLoadSystemTest`, `SaveLoadSystem3Test`,
         `WorldEngineKeyTest`, `MapperBitsTest` (incluant `composeMappingId` avec
         drop biome pour air et traitement light unsigned)
@@ -233,8 +233,8 @@ Dans `IrisVoxyRenderPipeline.java` :
       - **commonImpl statiques** : `WorldIdentifierStaticsTest` (mixStafford13
         determinism + avalanche), `VoxyCommonTest` (verification flags,
         défauts, system properties, only literal "true")
-      - **Mipper** : `MipperTest` (all-air branch, sky-light ceil, **pin du bug
-        block-light over-shift dans le branch all-air**)
+      - **Mipper** : `MipperTest` (all-air branch, sky-light ceil, block-light
+        averaging — couvre le fix du bug d'over-shift)
       - **Client utils** : `ExpandingObjectAllocationListTest` (put/release/get
         + reuse + croissance au-delà de 16), `RingUtilTest` (halfSphere,
         halfCircle, corner2D dans le rayon), `RingTrackerTest` (fill/unload
@@ -242,20 +242,22 @@ Dans `IrisVoxyRenderPipeline.java` :
         `ScanMesher2DTest` (round-trip random sparse, MAX_SIZE=16,
         merging row/colonne, reset)
       - **Position tracker** : `LoadedPositionTrackerTest` (mix Stafford,
-        zero-key special slot, exchange, **pin du bug check-null inversé**
-        dans la branche non-zero)
-    - Ont capturé un bug réel dans `LZ4Compressor.decompress` (taille retournée incorrecte)
-    - Bugs additionnels documentés (pinned via assertion) :
-      - `LoadedPositionTracker.getSecOrMakeLoader` lance `IllegalStateException`
-        sur tout slot fraîchement acquis pour `loc != 0` (check `value[pos]==null`
-        inversé). Chemin jamais exécuté en prod, mais le test verrouille le
-        comportement actuel pour casser quand le bug sera corrigé.
-      - `Mipper.mip()` branche all-air over-shift `blockLight` (after `/8` la
-        valeur est déjà à la position high-nibble, le `<< 4` la pousse hors
-        du byte → composante block-light silencieusement à zéro). Le test
-        verrouille le comportement actuel.
+        zero-key special slot, exchange, get/store non-zero keys, distinct
+        keys, capacité défaut — couvre le fix du bug check-null inversé)
+    - Bugs capturés et **corrigés** par les tests :
+      - `LZ4Compressor.decompress` retournait une taille incorrecte (corrigé
+        2026-04-18).
+      - `LoadedPositionTracker.getSecOrMakeLoader` (corrigé 2026-04-19) :
+        l'assertion `value[pos] == null` était inversée — un slot fraîchement
+        CAS-acquis doit être null, donc le throw doit être `!= null`. Le
+        chemin non-zero key est désormais utilisable.
+      - `Mipper.mip()` branche all-air (corrigé 2026-04-19) : `blockLight`
+        après `/8` est déjà aligné high-nibble, le `<< 4` final le poussait
+        hors du byte → composante block-light silencieusement à zéro. Fix :
+        retirer le `<< 4`.
+    - Bug restant non corrigé (laissé intact, code mort) :
       - `AllocationArena.getLargestFreeBlockSize` (`tailSet(-1)` vide sous
-        `compareUnsigned`) — non utilisé hors `main()`, laissé intact.
+        `compareUnsigned`) — non utilisé hors `main()`.
     - Reste à couvrir : Redis backend (nécessite infra), compression XZ (pas de wrapper),
       chemins d'ingestion, pipeline de rendu, classes dépendantes de Mapper
       (`IdRemapper` nécessite `Blocks.AIR.defaultBlockState()` = runtime Minecraft)

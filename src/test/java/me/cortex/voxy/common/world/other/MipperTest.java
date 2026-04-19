@@ -13,7 +13,6 @@ class MipperTest {
 
     @Test
     void allAirReturnsAirShape() {
-        // The result must still be air (block component = 0).
         long out = Mipper.mip(
                 air(0, 0), air(0, 0), air(0, 0), air(0, 0),
                 air(0, 0), air(0, 0), air(0, 0), air(0, 0),
@@ -33,8 +32,7 @@ class MipperTest {
     }
 
     @Test
-    void allAirSkyLightFlooredAtMostOnceWhenAllZero() {
-        // Sky=0 across the board → ceil(0/8) = 0.
+    void allAirSkyLightZeroWhenAllZero() {
         long out = Mipper.mip(
                 air(0, 0), air(0, 0), air(0, 0), air(0, 0),
                 air(0, 0), air(0, 0), air(0, 0), air(0, 0),
@@ -53,23 +51,34 @@ class MipperTest {
     }
 
     @Test
-    void allAirBlockLightAveragingIsBuggyAndOverflows() {
-        // Documents a real bug: the all-air branch in Mipper.mip computes
-        //   blockLight = sum(light & 0xF0) / 8
-        //   ...
-        //   return withLight(I111, (blockLight << 4) | skyLight);
-        // But (light & 0xF0) keeps the nibble at its high position (0..240, step 16),
-        // so after /8 the block value is already at high-nibble position (e.g. 0x70),
-        // and the extra "<< 4" shifts it past the byte (0x700). withLight then masks
-        // with 0xFF, so the entire block-light component is silently zeroed.
-        //
-        // This test pins the current (broken) behavior — change it if/when the bug is fixed.
+    void allAirPreservesUniformBlockLight() {
+        // All eight voxels with block-light = 8: average must come back as 8.
+        long v = air(8, 0);
+        long out = Mipper.mip(v, v, v, v, v, v, v, v, null);
+        int blockNibble = (Mapper.getLightId(out) >> 4) & 0xF;
+        assertEquals(8, blockNibble, "uniform block light must round-trip");
+    }
+
+    @Test
+    void allAirAveragesBlockLightArithmetically() {
+        // Block-light values 0,2,4,6,8,10,12,14 → arithmetic mean 7.
         long out = Mipper.mip(
-                air(8, 0), air(8, 0), air(8, 0), air(8, 0),
-                air(8, 0), air(8, 0), air(8, 0), air(8, 0),
+                air(0, 0), air(2, 0), air(4, 0), air(6, 0),
+                air(8, 0), air(10, 0), air(12, 0), air(14, 0),
                 null);
         int blockNibble = (Mapper.getLightId(out) >> 4) & 0xF;
-        assertEquals(0, blockNibble,
-                "current implementation drops block-light average; remove this assertion when fixed");
+        assertEquals(7, blockNibble, "block light should be arithmetic mean (0+2+...+14)/8 = 7");
+    }
+
+    @Test
+    void allAirCombinesBlockAndSkyLightIndependently() {
+        // Different block-light and sky-light values must both survive in their nibbles.
+        long out = Mipper.mip(
+                air(15, 1), air(15, 1), air(15, 1), air(15, 1),
+                air(15, 1), air(15, 1), air(15, 1), air(15, 1),
+                null);
+        int light = Mapper.getLightId(out);
+        assertEquals(15, (light >> 4) & 0xF, "block nibble");
+        assertEquals(1, light & 0xF, "sky nibble");
     }
 }
