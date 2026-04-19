@@ -125,6 +125,25 @@ class AllocationArenaTest {
     }
 
     @Test
+    void numFreeBlocksTracksFragmentation() {
+        AllocationArena a = new AllocationArena();
+        long p0 = a.alloc(50);
+        long p1 = a.alloc(50);
+        long p2 = a.alloc(50);
+        long p3 = a.alloc(50);
+        a.alloc(50); // tail anchor so frees don't shrink the arena
+        assertEquals(0, a.numFreeBlocks());
+        a.free(p1);
+        assertEquals(1, a.numFreeBlocks());
+        a.free(p3); // not adjacent to p1's free block
+        assertEquals(2, a.numFreeBlocks());
+        a.free(p2); // bridges the two free blocks → merged
+        assertEquals(1, a.numFreeBlocks());
+        a.free(p0); // merges into the front
+        assertEquals(1, a.numFreeBlocks());
+    }
+
+    @Test
     void randomizedAllocFreeNeverOverlaps() {
         AllocationArena a = new AllocationArena();
         Random r = new Random(0xC0DEL);

@@ -89,4 +89,46 @@ class LZ4CompressorTest {
             tooSmall.free();
         }
     }
+
+    @Test
+    void decompressRejectsNegativeDeclaredSize() {
+        LZ4Compressor c = new LZ4Compressor();
+        MemoryBuffer bad = new MemoryBuffer(8);
+        try {
+            UnsafeUtil.memPutInt(bad.address, -1);
+            UnsafeUtil.memPutInt(bad.address + 4, 0);
+            assertEquals(null, c.decompress(bad));
+        } finally {
+            bad.free();
+        }
+    }
+
+    @Test
+    void decompressRejectsAbsurdlyLargeDeclaredSize() {
+        LZ4Compressor c = new LZ4Compressor();
+        MemoryBuffer bad = new MemoryBuffer(8);
+        try {
+            UnsafeUtil.memPutInt(bad.address, Integer.MAX_VALUE);
+            UnsafeUtil.memPutInt(bad.address + 4, 0);
+            assertEquals(null, c.decompress(bad));
+        } finally {
+            bad.free();
+        }
+    }
+
+    @Test
+    void decompressRejectsCorruptBodyAfterValidHeader() {
+        LZ4Compressor c = new LZ4Compressor();
+        // Valid declared size (small) but body is garbage that won't decode.
+        MemoryBuffer bad = new MemoryBuffer(16);
+        try {
+            UnsafeUtil.memPutInt(bad.address, 64);
+            for (int i = 4; i < 16; i++) {
+                UnsafeUtil.memPutByte(bad.address + i, (byte) 0xFF);
+            }
+            assertEquals(null, c.decompress(bad), "corrupt body must be caught and return null");
+        } finally {
+            bad.free();
+        }
+    }
 }

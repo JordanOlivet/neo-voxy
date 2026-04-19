@@ -119,4 +119,110 @@ class WorldSectionTest {
         assertEquals(a.hashCode(), b.hashCode());
         assertTrue(a.hashCode() != c.hashCode());
     }
+
+    @Test
+    void freshSectionIsLoadedWithZeroRefs() {
+        WorldSection s = WorldSection._createRawUntrackedUnsafeSection(0, 0, 0, 0);
+        assertEquals(0, s.getRefCount());
+        assertTrue(!s.isFreed());
+    }
+
+    @Test
+    void acquireAndReleaseBalance() {
+        WorldSection s = WorldSection._createRawUntrackedUnsafeSection(0, 0, 0, 0);
+        assertEquals(1, s.acquire());
+        assertEquals(2, s.acquire());
+        assertEquals(4, s.acquire(2));
+        // release without unload to avoid the untracked-section self-free path.
+        // Final release to 0 triggers freeing — test that separately.
+        for (int i = 0; i < 3; i++) {
+            s.release(false);
+        }
+        assertEquals(1, s.getRefCount());
+    }
+
+    @Test
+    void releaseToZeroOnUntrackedSectionFrees() {
+        WorldSection s = WorldSection._createRawUntrackedUnsafeSection(0, 0, 0, 0);
+        s.acquire();
+        s.release(); // drops to 0 → untracked path frees
+        assertTrue(s.isFreed());
+    }
+
+    @Test
+    void tryAcquireFailsOnFreedSection() {
+        WorldSection s = WorldSection._createRawUntrackedUnsafeSection(0, 0, 0, 0);
+        s.acquire();
+        s.release(); // now freed (untracked path)
+        assertTrue(!s.tryAcquire());
+    }
+
+    @Test
+    void tryAcquireIncrementsRefsWhenLoaded() {
+        WorldSection s = WorldSection._createRawUntrackedUnsafeSection(0, 0, 0, 0);
+        assertTrue(s.tryAcquire());
+        assertEquals(1, s.getRefCount());
+        s.release(false);
+    }
+
+    @Test
+    void dirtyFlagToggles() {
+        WorldSection s = WorldSection._createRawUntrackedUnsafeSection(0, 0, 0, 0);
+        assertTrue(!s.setNotDirty(), "fresh section should not be dirty");
+        s.markDirty();
+        assertTrue(s.setNotDirty(), "markDirty should be observed");
+        assertTrue(!s.setNotDirty(), "second setNotDirty clears the flag");
+    }
+
+    @Test
+    void inSaveQueueFlagExchange() {
+        WorldSection s = WorldSection._createRawUntrackedUnsafeSection(0, 0, 0, 0);
+        // false → true must succeed on fresh section.
+        assertTrue(s.exchangeIsInSaveQueue(true));
+        // true → true must fail (already true, comparand is !state = false).
+        assertTrue(!s.exchangeIsInSaveQueue(true));
+        // true → false succeeds.
+        assertTrue(s.exchangeIsInSaveQueue(false));
+    }
+
+    @Test
+    void updateEmptyChildStateBitPerChild() {
+        WorldSection parent = WorldSection._createRawUntrackedUnsafeSection(1, 0, 0, 0);
+        // Child at (1,1,1) → bit index getChildIndex(1,1,1) = 0b111 = 7.
+        WorldSection child = WorldSection._createRawUntrackedUnsafeSection(0, 1, 1, 1);
+        child.addNonEmptyBlockCount(1);
+        child.updateLvl0State(); // child.nonEmptyChildren = 0xFF
+        int result = parent.updateEmptyChildState(child);
+        assertEquals(2, result, "nothing → something is a major state change");
+        assertEquals((byte) (1 << 7), parent.getNonEmptyChildren());
+
+        // Second update with same non-empty state = no change.
+        result = parent.updateEmptyChildState(child);
+        assertEquals(0, result);
+
+        // Child becomes empty → something → remove bit, but parent still non-zero? no, bit 7 was the only one.
+        child.addNonEmptyBlockCount(-1);
+        child.updateLvl0State();
+        result = parent.updateEmptyChildState(child);
+        assertEquals(2, result, "something → nothing is also a major state change");
+        assertEquals((byte) 0, parent.getNonEmptyChildren());
+    }
+
+    @Test
+    void updateEmptyChildStateMinorChange() {
+        // Two children non-empty, then one becomes empty → parent stays non-zero → minor change (return 1).
+        WorldSection parent = WorldSection._createRawUntrackedUnsafeSection(1, 0, 0, 0);
+        WorldSection a = WorldSection._createRawUntrackedUnsafeSection(0, 0, 0, 0);
+        WorldSection b = WorldSection._createRawUntrackedUnsafeSection(0, 1, 0, 0);
+        a.addNonEmptyBlockCount(1); a.updateLvl0State();
+        b.addNonEmptyBlockCount(1); b.updateLvl0State();
+        parent.updateEmptyChildState(a);
+        parent.updateEmptyChildState(b);
+        // Now both bits set. Clear one.
+        a.addNonEmptyBlockCount(-1);
+        a.updateLvl0State();
+        int result = parent.updateEmptyChildState(a);
+        assertEquals(1, result, "one bit cleared while another remains = minor change");
+        assertTrue(parent.getNonEmptyChildren() != 0);
+    }
 }

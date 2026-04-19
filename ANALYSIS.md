@@ -1,6 +1,6 @@
 # Neo-Voxy - Analyse du Portage Fabric -> NeoForge
 
-**Date**: 2026-04-16
+**Date**: 2026-04-18 (dernière mise à jour)
 **Version analysee**: 0.2.0
 **Minecraft**: 1.21.1 | **NeoForge**: 21.1.77+
 
@@ -22,8 +22,8 @@ Le mod reste **instable** avec des fonctionnalites partiellement fonctionnelles.
 | Integration Iris | 75% | Fonctionne mais binding points hardcodes |
 | Integration Sodium | 85% | Mixins en place, fonctionnel |
 | Stockage (backends) | 70% | LMDB/RocksDB fonctionnels, TODOs sur le locking |
-| Tests | 10% | Quasi inexistants |
-| Stabilite generale | 40% | Beaucoup de hacks reconnus |
+| Tests | 35% | 242 tests sur 31 classes (encoding, stockage, structures natives, réseau, util, config build, section lifecycle, section storage, paths config) |
+| Stabilite generale | 65% | Concurrence correctness fixée, intégrations Chunky/import propres |
 
 ---
 
@@ -140,10 +140,16 @@ Dans `IrisVoxyRenderPipeline.java` :
 
 ### Priorite BASSE (fonctionnalités additionnelles)
 
-10. **Integrations manquantes**
-    - Flashback (2 mixins a porter)
-    - Nvidium (1 mixin, necessite le mod NeoForge)
-    - Chunky (1 mixin, Fabric-specifique -> necessite adaptation complete)
+10. **Integrations manquantes** [PARTIEL 2026-04-18]
+    - FAIT — **Chunky** : `MixinNeoForgeWorld` wrap `ServerChunkCache#getChunkFutureMainThread`,
+      auto-ingest des chunks générés par Chunky dans Voxy. Config mixin optionnelle
+      (`voxy-chunky.mixins.json` `required:false`). Jar NF dans `libs/chunky-nf/` car
+      Modrinth Maven résout `chunky:1.4.23` vers la variante Forge.
+    - REPORTE — **Flashback** : aucun build NeoForge sur Modrinth pour 1.21.1
+      (Fabric-only au 2026-04). Code à réinstaller depuis git si un port apparaît
+      (`git show e98bddd4^:src/main/java/me/cortex/voxy/client/mixin/flashback/`).
+    - REPORTE — **Nvidium** : aucun build NeoForge officiel sur Modrinth pour 1.21.1.
+      Un fork non-officiel existe mais pas sur un repo Maven.
 
 11. **Model rendering incomplet**
     - `ModelFactory.java` : 28 TODOs sur la transparence, occlusion, modeles de blocs
@@ -167,30 +173,60 @@ Dans `IrisVoxyRenderPipeline.java` :
       de petits îlots flottants aux rives (moins visible que la grille). Fix : majority-vote
       avec eau préférée en cas de parité, ~30 lignes dans `Mipper.java`.
 
-12. **Import de monde**
-    - `WorldImporter.java` : Upgrade NBT format avec DataFixerUpper
-    - `DHImporter.java` : Import Distant Horizons (3 TODOs)
+12. **Import de monde** [FAIT 2026-04-18]
+    - FAIT — `WorldImporter.java` : helper `upgradeChunkNbt()` qui passe chaque chunk dans
+      `DataFixers.getDataFixer().update(References.CHUNK, ...)` avant `importChunkNBT`.
+      Les anciens mondes (DataVersion < courant) sont upgrades avant extraction des sections.
+    - FAIT — `DHImporter.java` : `org.xerial:sqlite-jdbc:3.46.1.3` ajouté en bundle/forgeRuntimeLibrary.
+      `HasRequiredLibraries` flip à `true` au runtime — l'import DH devient fonctionnel.
+    - REPORTE : TODOs perf restants (memory copy par section L.346 WorldImporter ;
+      data cache XZ stream + VoxelizedSection 32³ L.276/279 DHImporter).
 
-13. **Tests** [EN COURS 2026-04-17]
-    - 177 tests JUnit sur 26 classes (173 + 4 de la passe concurrence) :
+15. **Render distance LOD étendue** [FAIT 2026-04-18]
+    - Cap du slider monté de 64 à 128 (= 4096 chunks vanilla, ~65 km). Permet de profiter
+      pleinement d'une pré-génération Chunky. La VRAM/RAM sera le goulot pratique avant le
+      cap arena (4 G éléments — voir notes dans `AllocationArena`).
+
+13. **Tests** [EN COURS 2026-04-18]
+    - 242 tests JUnit sur 31 classes (177 + 65 ajoutés 2026-04-18) :
       - **Encoding / bit math** : `SaveLoadSystemTest`, `SaveLoadSystem3Test`,
-        `WorldEngineKeyTest`, `MapperBitsTest`
+        `WorldEngineKeyTest`, `MapperBitsTest` (incluant `composeMappingId` avec
+        drop biome pour air et traitement light unsigned)
       - **Sérialisation sections** : `SaveLoadRoundTripTest`, `SaveLoadSystem3Test`,
         `SectionSerializerTest` (GZIP + header)
-      - **Compression** : `LZ4CompressorTest`, `ZSTDCompressorTest`
+      - **Compression** : `LZ4CompressorTest` (round-trips + rejets corruption :
+        header tronqué, taille négative, taille absurde, body invalide),
+        `ZSTDCompressorTest` (round-trips + rejet payload garbage)
       - **Backends stockage** : `MemoryStorageBackendTest`, `LMDBStorageBackendTest`,
         `RocksDBStorageBackendTest` (avec @TempDir pour persistance)
       - **Adaptateurs stockage** : `CompressionStorageAdaptorTest`,
-        `ReadonlyCachingLayerTest`, `FragmentedStorageBackendAdaptorTest`
+        `ReadonlyCachingLayerTest`, `FragmentedStorageBackendAdaptorTest`,
+        `SectionSerializationStorageTest` (round-trip via SaveLoadSystem3,
+        return codes 0/1/-1, suppression auto sur payload corrompu, iterate),
+        `BasicPathInsertionConfigTest` (push/pop path, override absolu,
+        balance du stack)
       - **Structures natives** : `HierarchicalBitSetTest`, `AllocationArenaTest`,
         `MemoryBufferTest`, `UnsafeUtilTest`
       - **Réseau** : `BloomFilterTest` (false-positive rate, serialization),
-        `SharedBandwidthLimitTest` (fair sharing)
+        `SharedBandwidthLimitTest` (fair sharing), `VoxyPacketPayloadTest`
+        (rateUpdate/requestSections/cacheQuery/cacheResponse round-trips,
+        delta-encoding compacité, limites batch size, rejets wrong message type)
       - **Utilitaires** : `PairTest`, `MessageQueueTest`,
-        `ByteBufferBackedInputStreamTest`
+        `ByteBufferBackedInputStreamTest`, `MultiGsonTest` (round-trip + erreurs :
+        unknown class, duplicate field, mismatched arg count)
+      - **Config build** : `ConfigBuildCtxTest` (resolvePath avec stack, paths
+        absolus/drive letter, rejet `..`, substituteString, ensurePathExists)
       - **WorldSection** : `WorldSectionTest` (getIndex/getChildIndex, set,
-        copyData, nonEmptyBlockCount, updateLvl0State)
+        copyData, nonEmptyBlockCount, updateLvl0State, acquire/release lifecycle,
+        tryAcquire sur section freed, dirty/inSaveQueue flags,
+        updateEmptyChildState major/minor transitions)
     - Ont capturé un bug réel dans `LZ4Compressor.decompress` (taille retournée incorrecte)
+    - Passe 2026-04-18 a aussi révélé deux classes à code mort/cassé non utilisées par
+      le runtime : `LoadedPositionTracker.getSecOrMakeLoader` (lance `IllegalStateException`
+      sur tout slot fraîchement acquis pour `loc != 0` — chemin jamais exécuté en prod) et
+      `AllocationArena.getLargestFreeBlockSize` (`tailSet(-1)` vide sous `compareUnsigned`).
+      Aucune des deux n'est référencée hors de leurs `main()` → laissées intactes mais à
+      flagger si quelqu'un veut les réactiver.
     - Reste à couvrir : Redis backend (nécessite infra), compression XZ (pas de wrapper),
       chemins d'ingestion, pipeline de rendu, classes dépendantes de Mapper
       (`IdRemapper` nécessite `Blocks.AIR.defaultBlockState()` = runtime Minecraft)

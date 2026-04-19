@@ -94,4 +94,20 @@ class ZSTDCompressorTest {
         in.free();
         compressed.free();
     }
+
+    @Test
+    void decompressReturnsNullOnGarbage() {
+        ZSTDCompressor c = new ZSTDCompressor(3);
+        MemoryBuffer junk = new MemoryBuffer(64);
+        try {
+            for (int i = 0; i < 64; i++) {
+                UnsafeUtil.memPutByte(junk.address + i, (byte) (i ^ 0xA5));
+            }
+            assertEquals(null, c.decompress(junk),
+                    "decompress must return null on payload that lacks valid ZSTD frame");
+        } finally {
+            junk.free();
+        }
+    }
+
 }

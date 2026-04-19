@@ -70,4 +70,32 @@ class MapperBitsTest {
         assertEquals(0, Mapper.getBiomeId(v));
         assertTrue(Mapper.isAir(v));
     }
+
+    @Test
+    void composeMappingIdRoundTripsAllFields() {
+        long v = Mapper.composeMappingId((byte) 0x7F, 0xABCDE, 0x1AB);
+        assertEquals(0x7F, Mapper.getLightId(v));
+        assertEquals(0xABCDE, Mapper.getBlockId(v));
+        assertEquals(0x1AB, Mapper.getBiomeId(v));
+        assertFalse(Mapper.isAir(v));
+    }
+
+    @Test
+    void composeMappingIdDropsBiomeForAir() {
+        // blockId == AIR (0) → biome is intentionally zeroed (air states share biome slot)
+        long v = Mapper.composeMappingId((byte) 0x15, 0, 0x1AB);
+        assertEquals(0x15, Mapper.getLightId(v));
+        assertEquals(0, Mapper.getBlockId(v));
+        assertEquals(0, Mapper.getBiomeId(v), "biome must be dropped when block is air");
+        assertTrue(Mapper.isAir(v));
+    }
+
+    @Test
+    void composeMappingIdTreatsLightAsUnsigned() {
+        // Byte -1 = 0xFF unsigned; must not sign-extend into block/biome bits.
+        long v = Mapper.composeMappingId((byte) -1, 1, 1);
+        assertEquals(0xFF, Mapper.getLightId(v));
+        assertEquals(1, Mapper.getBlockId(v));
+        assertEquals(1, Mapper.getBiomeId(v));
+    }
 }
