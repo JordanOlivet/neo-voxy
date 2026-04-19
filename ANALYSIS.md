@@ -22,7 +22,7 @@ Le mod reste **instable** avec des fonctionnalites partiellement fonctionnelles.
 | Integration Iris | 75% | Fonctionne mais binding points hardcodes |
 | Integration Sodium | 85% | Mixins en place, fonctionnel |
 | Stockage (backends) | 70% | LMDB/RocksDB fonctionnels, TODOs sur le locking |
-| Tests | 35% | 242 tests sur 31 classes (encoding, stockage, structures natives, réseau, util, config build, section lifecycle, section storage, paths config) |
+| Tests | 45% | 324 tests sur 43 classes (encoding, stockage, structures natives, réseau, util, config build, section lifecycle, section storage, paths config, voxelization, thread, voxel mipper, IdRemapper, ScanMesher2D, ring utils, allocation list, position tracker) |
 | Stabilite generale | 65% | Concurrence correctness fixée, intégrations Chunky/import propres |
 
 ---
@@ -187,8 +187,8 @@ Dans `IrisVoxyRenderPipeline.java` :
       pleinement d'une pré-génération Chunky. La VRAM/RAM sera le goulot pratique avant le
       cap arena (4 G éléments — voir notes dans `AllocationArena`).
 
-13. **Tests** [EN COURS 2026-04-18]
-    - 242 tests JUnit sur 31 classes (177 + 65 ajoutés 2026-04-18) :
+13. **Tests** [EN COURS 2026-04-19]
+    - 324 tests JUnit sur 43 classes (242 → 324, +82 ajoutés 2026-04-19) :
       - **Encoding / bit math** : `SaveLoadSystemTest`, `SaveLoadSystem3Test`,
         `WorldEngineKeyTest`, `MapperBitsTest` (incluant `composeMappingId` avec
         drop biome pour air et traitement light unsigned)
@@ -220,13 +220,42 @@ Dans `IrisVoxyRenderPipeline.java` :
         copyData, nonEmptyBlockCount, updateLvl0State, acquire/release lifecycle,
         tryAcquire sur section freed, dirty/inSaveQueue flags,
         updateEmptyChildState major/minor transitions)
+      - **Voxelization** : `VoxelizedSectionTest` (pyramid layout 16³+8³+4³+2³+1,
+        getBaseIndexForLevel, get/set par niveau, indexing yzx, zero/reset,
+        constructeur avec backing array externe)
+      - **Thread / weak maps** : `WeakConcurrentCleanableHashMapTest`
+        (computeIfAbsent, distinct ids, clear retourne values, cleanup post-GC
+        déclenche cleaner)
+      - **Réseau (IDs)** : `VoxyNetworkHandlerCapabilitiesTest` (set/remove
+        capabilities, indépendance par UUID), `IdRemapperTest` (mapping
+        block/biome avec light préservé, branche air drop biome, defaults
+        à zéro pour ids inconnus, reset clears state)
+      - **commonImpl statiques** : `WorldIdentifierStaticsTest` (mixStafford13
+        determinism + avalanche), `VoxyCommonTest` (verification flags,
+        défauts, system properties, only literal "true")
+      - **Mipper** : `MipperTest` (all-air branch, sky-light ceil, **pin du bug
+        block-light over-shift dans le branch all-air**)
+      - **Client utils** : `ExpandingObjectAllocationListTest` (put/release/get
+        + reuse + croissance au-delà de 16), `RingUtilTest` (halfSphere,
+        halfCircle, corner2D dans le rayon), `RingTrackerTest` (fill/unload
+        symétriques, moveCenter petit/grand delta, stealing constructor),
+        `ScanMesher2DTest` (round-trip random sparse, MAX_SIZE=16,
+        merging row/colonne, reset)
+      - **Position tracker** : `LoadedPositionTrackerTest` (mix Stafford,
+        zero-key special slot, exchange, **pin du bug check-null inversé**
+        dans la branche non-zero)
     - Ont capturé un bug réel dans `LZ4Compressor.decompress` (taille retournée incorrecte)
-    - Passe 2026-04-18 a aussi révélé deux classes à code mort/cassé non utilisées par
-      le runtime : `LoadedPositionTracker.getSecOrMakeLoader` (lance `IllegalStateException`
-      sur tout slot fraîchement acquis pour `loc != 0` — chemin jamais exécuté en prod) et
-      `AllocationArena.getLargestFreeBlockSize` (`tailSet(-1)` vide sous `compareUnsigned`).
-      Aucune des deux n'est référencée hors de leurs `main()` → laissées intactes mais à
-      flagger si quelqu'un veut les réactiver.
+    - Bugs additionnels documentés (pinned via assertion) :
+      - `LoadedPositionTracker.getSecOrMakeLoader` lance `IllegalStateException`
+        sur tout slot fraîchement acquis pour `loc != 0` (check `value[pos]==null`
+        inversé). Chemin jamais exécuté en prod, mais le test verrouille le
+        comportement actuel pour casser quand le bug sera corrigé.
+      - `Mipper.mip()` branche all-air over-shift `blockLight` (after `/8` la
+        valeur est déjà à la position high-nibble, le `<< 4` la pousse hors
+        du byte → composante block-light silencieusement à zéro). Le test
+        verrouille le comportement actuel.
+      - `AllocationArena.getLargestFreeBlockSize` (`tailSet(-1)` vide sous
+        `compareUnsigned`) — non utilisé hors `main()`, laissé intact.
     - Reste à couvrir : Redis backend (nécessite infra), compression XZ (pas de wrapper),
       chemins d'ingestion, pipeline de rendu, classes dépendantes de Mapper
       (`IdRemapper` nécessite `Blocks.AIR.defaultBlockState()` = runtime Minecraft)
