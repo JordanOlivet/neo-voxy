@@ -1199,9 +1199,12 @@ public class NodeManager {
                 return;
             }
 
-            // Check if the node is already in-flight, if it is, dont do any processing
+            // Check if the node is already in-flight, if it is, dont do any processing.
+            // Demoted to debug 2026-04-19: this is a known/benign GPU↔worker race
+            // (see TODO above). The original request is still in flight and will
+            // complete normally; the duplicate is just stale GPU state.
             if (this.nodeData.isNodeRequestInFlight(nodeId)) {
-                Logger.warn("Tried processing a node that already has a request in flight: " + nodeId + " pos: "
+                Logger.debug("Tried processing a node that already has a request in flight: " + nodeId + " pos: "
                         + WorldEngine.pprintPos(pos) + " ignoring");
                 return;
             }

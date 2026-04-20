@@ -80,6 +80,19 @@ public class Logger {
         LOGGER.warn((INSERT_CLASS?("["+callClsName()+"]: "):"") + Stream.of(args).map(Logger::objToString).collect(Collectors.joining(" ")), throwable);
     }
 
+    public static void debug(Object... args) {
+        if (SHUTUP) {
+            return;
+        }
+        Throwable throwable = null;
+        for (var i : args) {
+            if (i instanceof Throwable) {
+                throwable = (Throwable) i;
+            }
+        }
+        LOGGER.debug((INSERT_CLASS?("["+callClsName()+"]: "):"") + Stream.of(args).map(Logger::objToString).collect(Collectors.joining(" ")), throwable);
+    }
+
     public static void info(Object... args) {
         if (SHUTUP||SHUTUP_INFO) {
             return;

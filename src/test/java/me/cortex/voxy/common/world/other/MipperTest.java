@@ -71,6 +71,35 @@ class MipperTest {
     }
 
     @Test
+    void maxLightTakesMaxAcrossAllVoxels() {
+        // Mixed sky/block light: result is per-channel MAX (8 in block, 12 in sky).
+        long a = air(8, 0);
+        long b = air(0, 12);
+        long c = air(0, 0);
+        int packed = Mipper.maxLight(a, c, c, c, c, c, c, b);
+        assertEquals(8, (packed >> 4) & 0xF, "block light max");
+        assertEquals(12, packed & 0xF, "sky light max");
+    }
+
+    @Test
+    void maxLightZeroWhenAllVoxelsDark() {
+        long dark = air(0, 0);
+        int packed = Mipper.maxLight(dark, dark, dark, dark, dark, dark, dark, dark);
+        assertEquals(0, packed);
+    }
+
+    @Test
+    void maxLightSingleBrightVoxelDominates() {
+        // One bright voxel pulls the entire mip to its level — by design, so distant
+        // bright spots stay visible (matches the original author's "bright irl" note).
+        long dark = air(0, 0);
+        long bright = air(15, 15);
+        int packed = Mipper.maxLight(dark, dark, dark, bright, dark, dark, dark, dark);
+        assertEquals(15, (packed >> 4) & 0xF);
+        assertEquals(15, packed & 0xF);
+    }
+
+    @Test
     void allAirCombinesBlockAndSkyLightIndependently() {
         // Different block-light and sky-light values must both survive in their nibbles.
         long out = Mipper.mip(

@@ -54,7 +54,7 @@ public class Mipper {
         }
 
         if (max != -1) {
-            return switch (max&0b111) {
+            long picked = switch (max&0b111) {
                 case 0 -> I000;
                 case 1 -> I001;
                 case 2 -> I010;
@@ -65,6 +65,13 @@ public class Mipper {
                 case 7 -> I111;
                 default -> throw new IllegalStateException("Unexpected value: " + (max&0b111));
             };
+            // Resolved (2026-04-20): use MAX light across all 8 source voxels (sky and
+            // block separately) instead of the picked voxel's light. The picked voxel
+            // is chosen for opacity, not lighting, so a tree trunk in shadow can be
+            // selected and inherit sky=0/block=0, producing pitch-black mip blocks at
+            // distance. Per the author's note above ("a point bright irl is visible
+            // from far"), max is the right reduction here.
+            return withLight(picked, maxLight(I000, I001, I010, I011, I100, I101, I110, I111));
         } else {
             int blockLight = (Mapper.getLightId(I000) & 0xF0) + (Mapper.getLightId(I001) & 0xF0) + (Mapper.getLightId(I010) & 0xF0) + (Mapper.getLightId(I011) & 0xF0) +
                     (Mapper.getLightId(I100) & 0xF0) + (Mapper.getLightId(I101) & 0xF0) + (Mapper.getLightId(I110) & 0xF0) + (Mapper.getLightId(I111) & 0xF0);
@@ -79,5 +86,23 @@ public class Mipper {
 
             return withLight(I111, blockLight | skyLight);
         }
+    }
+
+    // Returns the per-channel max of block-light (high nibble) and sky-light (low nibble)
+    // across the 8 input voxels, packed into a single byte ready for withLight().
+    static int maxLight(long v000, long v001, long v010, long v011,
+                        long v100, long v101, long v110, long v111) {
+        int maxBlock = 0;
+        int maxSky = 0;
+        int l;
+        l = Mapper.getLightId(v000); if ((l & 0xF0) > maxBlock) maxBlock = l & 0xF0; if ((l & 0x0F) > maxSky) maxSky = l & 0x0F;
+        l = Mapper.getLightId(v001); if ((l & 0xF0) > maxBlock) maxBlock = l & 0xF0; if ((l & 0x0F) > maxSky) maxSky = l & 0x0F;
+        l = Mapper.getLightId(v010); if ((l & 0xF0) > maxBlock) maxBlock = l & 0xF0; if ((l & 0x0F) > maxSky) maxSky = l & 0x0F;
+        l = Mapper.getLightId(v011); if ((l & 0xF0) > maxBlock) maxBlock = l & 0xF0; if ((l & 0x0F) > maxSky) maxSky = l & 0x0F;
+        l = Mapper.getLightId(v100); if ((l & 0xF0) > maxBlock) maxBlock = l & 0xF0; if ((l & 0x0F) > maxSky) maxSky = l & 0x0F;
+        l = Mapper.getLightId(v101); if ((l & 0xF0) > maxBlock) maxBlock = l & 0xF0; if ((l & 0x0F) > maxSky) maxSky = l & 0x0F;
+        l = Mapper.getLightId(v110); if ((l & 0xF0) > maxBlock) maxBlock = l & 0xF0; if ((l & 0x0F) > maxSky) maxSky = l & 0x0F;
+        l = Mapper.getLightId(v111); if ((l & 0xF0) > maxBlock) maxBlock = l & 0xF0; if ((l & 0x0F) > maxSky) maxSky = l & 0x0F;
+        return maxBlock | maxSky;
     }
 }
