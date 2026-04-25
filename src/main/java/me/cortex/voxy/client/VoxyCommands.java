@@ -7,6 +7,7 @@ import com.mojang.brigadier.suggestion.Suggestions;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
 import me.cortex.voxy.client.core.LodReceptionService;
+import me.cortex.voxy.client.core.rendering.ChunkBoundRenderer;
 import me.cortex.voxy.common.network.VoxyNetworkHandler;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
@@ -58,7 +59,22 @@ public class VoxyCommands {
                         .executes(VoxyCommands::reloadInstance))
                 .then(Commands.literal("sync")
                         .executes(VoxyCommands::syncLod))
+                .then(Commands.literal("debugBounds")
+                        .executes(VoxyCommands::toggleDebugBounds))
                 .then(imports);
+    }
+
+    // Diagnosis tool for the phantom-occlusion bug (see ChunkBoundRenderer.java).
+    // Toggles AABB rasterization on/off at runtime. If toggling makes invisible
+    // LOD chunks reappear → confirmed phantom-occlusion → consider whether the
+    // option-B chebyshev edge-ring skip in outline.vsh still covers the case, or
+    // whether option A (tight per-section bounds) is now warranted.
+    private static int toggleDebugBounds(CommandContext<CommandSourceStack> ctx) {
+        boolean now = !ChunkBoundRenderer.DEBUG_DISABLE_DEPTH_BOUNDS;
+        ChunkBoundRenderer.DEBUG_DISABLE_DEPTH_BOUNDS = now;
+        ctx.getSource().sendSystemMessage(Component.literal(
+                "ChunkBoundRenderer depth-bounds rasterization: " + (now ? "DISABLED" : "ENABLED")));
+        return 0;
     }
 
     private static int reloadInstance(CommandContext<CommandSourceStack> ctx) {

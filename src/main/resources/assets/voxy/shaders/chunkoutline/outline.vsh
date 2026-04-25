@@ -2,6 +2,8 @@
 
 layout(binding = 0, std140) uniform SceneUniform {
     mat4 MVP;
+    // section.xyz = camera position in blocks
+    // section.w   = vanilla render distance in chunks (option-B phantom-occlusion skip)
     ivec4 section;
     vec4 negInnerSec;
 };
@@ -37,10 +39,26 @@ vec2 getTAA();
 void main() {
     uint id = (gl_InstanceID<<5)+gl_BaseInstance+(gl_VertexID>>3);
 
-    ivec3 origin = unpackPos(chunkPos[id])*16;
+    ivec3 secChunk = unpackPos(chunkPos[id]);
+    ivec3 origin = secChunk*16;
     origin -= section.xyz;
 
     if (!shouldRender(origin)) {
+        gl_Position = vec4(-100.0f, -100.0f, -100.0f, 0.0f);
+        return;
+    }
+
+    // === Option B fix for phantom-occlusion bug (see ChunkBoundRenderer.java) ===
+    // Skip AABB rasterization for sections in the outermost vanilla RD ring (and
+    // the one just inside it as a safety margin). Edge-ring sections are typically
+    // partially populated (terrain bottom + sky air top); a full 16^3 AABB would
+    // over-cover the empty portion and discard the LOD pixels meant to render
+    // there. Test is purely XZ chebyshev — vanilla RD is XZ-only.
+    // To upgrade to option A (tight AABBs everywhere), this check can be removed
+    // once the upload format and cube generation support per-section min/max.
+    ivec3 camChunk = section.xyz >> 4;
+    int chebXZ = max(abs(secChunk.x - camChunk.x), abs(secChunk.z - camChunk.z));
+    if (chebXZ >= section.w - 1) {
         gl_Position = vec4(-100.0f, -100.0f, -100.0f, 0.0f);
         return;
     }
