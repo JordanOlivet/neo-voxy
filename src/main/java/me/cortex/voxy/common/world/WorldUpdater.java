@@ -26,6 +26,14 @@ public class WorldUpdater {
         for (int lvl = 0; lvl <= MAX_LOD_LAYER; lvl++) {
             var worldSection = into.acquire(lvl, section.x >> (lvl + 1), section.y >> (lvl + 1), section.z >> (lvl + 1));
 
+            //Mark which octant of this WS the incoming VS lands in. At lvl N, the VS writes a
+            // (16>>lvl)^3 region at offset bx/by/bz; dividing by 16 yields the octant axis bit.
+            // Bit layout matches WorldSection.getChildIndex: x=bit0, z=bit1, y=bit2.
+            int ingestOctant = ((section.x >> lvl) & 1)
+                    | (((section.z >> lvl) & 1) << 1)
+                    | (((section.y >> lvl) & 1) << 2);
+            boolean justBecameFullyIngested = worldSection.markOctantIngested(ingestOctant);
+
             int emptinessStateChange = 0;
             //Propagate the child existence state of the previous iteration to this section
             if (lvl != 0 && shouldCheckEmptiness) {
@@ -98,7 +106,7 @@ public class WorldUpdater {
                 }
             }
 
-            if (didStateChange||(emptinessStateChange!=0)) {
+            if (didStateChange||(emptinessStateChange!=0)||justBecameFullyIngested) {
                 //TODO: somehow foward the neighbors that are facing the updated area, this allows forwarding to the dirty consumer
                 // which can decide wether to dispatch mesh rebuilds to the surounding sections
                 //Bitmask of neighboring sections
@@ -113,26 +121,27 @@ public class WorldUpdater {
                     neighbors |= ((section.z^(section.z+1))>>(lvl+1))==0?0:1<<5;//+z
                 }
 
-                into.markDirty(worldSection, (didStateChange?UPDATE_TYPE_BLOCK_BIT:0)|(emptinessStateChange!=0?UPDATE_TYPE_CHILD_EXISTENCE_BIT:0), neighbors);
+                //Flag a block-bit update on the fully-ingested transition too so the mesh builder
+                // re-runs for a section whose last ingest wrote only identical data (didStateChange=false).
+                int flags = (didStateChange||justBecameFullyIngested?UPDATE_TYPE_BLOCK_BIT:0)
+                        |(emptinessStateChange!=0?UPDATE_TYPE_CHILD_EXISTENCE_BIT:0);
+                into.markDirty(worldSection, flags, neighbors);
             }
 
             //Need to release the section after using it
-            if (didStateChange||(emptinessStateChange==2)) {
-                if (emptinessStateChange==2) {
-                    //Major state emptiness change, bubble up
-                    shouldCheckEmptiness = true;
-                    //Dont release the section, it will be released on the next loop
-                    previousSection = worldSection;
-                } else {
-                    //Propagate up without state change
-                    shouldCheckEmptiness = false;
-                    previousSection = null;
-                    worldSection.release();
-                }
+            if (emptinessStateChange==2) {
+                //Major state emptiness change, bubble up
+                shouldCheckEmptiness = true;
+                //Dont release the section, it will be released on the next loop
+                previousSection = worldSection;
             } else {
-                //If nothing changed just need to release, dont need to update parent mips
+                //Propagate up without state change. Note: we deliberately do NOT `break` here
+                // even when nothing changed — each lvl needs its own markOctantIngested call so
+                // the ingestion gate at higher lvls tracks all VS contributions, not just those
+                // whose data happened to change at lvl 0.
+                shouldCheckEmptiness = false;
+                previousSection = null;
                 worldSection.release();
-                break;
             }
         }
 

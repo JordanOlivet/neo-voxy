@@ -414,6 +414,7 @@ public class SaveLoadSystem2 {
             return false;
         }
 
+        section._unsafeSetFullyIngested();
         return true;
     }
 

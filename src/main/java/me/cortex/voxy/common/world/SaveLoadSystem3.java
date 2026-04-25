@@ -120,6 +120,7 @@ public class SaveLoadSystem3 {
             }
         }
         ptr = lutBasePtr + (metadata & 0xFFFF) * 8L;
+        section._unsafeSetFullyIngested();
         return true;
     }
 }

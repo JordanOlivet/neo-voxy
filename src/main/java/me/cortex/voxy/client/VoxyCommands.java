@@ -1,27 +1,37 @@
 package me.cortex.voxy.client;
 
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.suggestion.Suggestions;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
+import it.unimi.dsi.fastutil.longs.Long2ReferenceMap;
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
 import me.cortex.voxy.client.core.LodReceptionService;
 import me.cortex.voxy.client.core.rendering.ChunkBoundRenderer;
+import me.cortex.voxy.client.mixin.sodium.AccessorRenderSectionManager;
+import me.cortex.voxy.client.mixin.sodium.AccessorSodiumWorldRenderer;
+import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.network.VoxyNetworkHandler;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
 import me.cortex.voxy.commonImpl.importers.DHImporter;
 import me.cortex.voxy.commonImpl.importers.WorldImporter;
+import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
+import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
+import net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
+import net.minecraft.core.SectionPos;
 import net.minecraft.network.chat.Component;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.concurrent.CompletableFuture;
 
 public class VoxyCommands {
@@ -61,7 +71,128 @@ public class VoxyCommands {
                         .executes(VoxyCommands::syncLod))
                 .then(Commands.literal("debugBounds")
                         .executes(VoxyCommands::toggleDebugBounds))
+                .then(Commands.literal("dumpbounds")
+                        .executes(ctx -> dumpBounds(ctx, -1))
+                        .then(Commands.argument("radius", IntegerArgumentType.integer(0, 64))
+                                .executes(ctx -> dumpBounds(ctx, IntegerArgumentType.getInteger(ctx, "radius")))))
                 .then(imports);
+    }
+
+    private static int dumpBounds(CommandContext<CommandSourceStack> ctx, int radiusArg) {
+        var mc = Minecraft.getInstance();
+        var wr = mc.levelRenderer;
+        if (!(wr instanceof IGetVoxyRenderSystem vrs)) {
+            ctx.getSource().sendFailure(Component.literal("Voxy render system not available"));
+            return 1;
+        }
+        var renderSystem = vrs.getVoxyRenderSystem();
+        if (renderSystem == null) {
+            ctx.getSource().sendFailure(Component.literal("Voxy render system not initialized"));
+            return 1;
+        }
+
+        int rd = mc.options.getEffectiveRenderDistance();
+        int radius = radiusArg < 0 ? rd + 3 : radiusArg;
+
+        var player = mc.player;
+        if (player == null) {
+            ctx.getSource().sendFailure(Component.literal("No player"));
+            return 1;
+        }
+        int pcx = SectionPos.blockToSectionCoord(player.getBlockX());
+        int pcy = SectionPos.blockToSectionCoord(player.getBlockY());
+        int pcz = SectionPos.blockToSectionCoord(player.getBlockZ());
+
+        long[] tracked = renderSystem.chunkBoundRenderer._debugGetTrackedPositions();
+        Arrays.sort(tracked);
+
+        SodiumWorldRenderer sodium = SodiumWorldRenderer.instanceNullable();
+        RenderSectionManager mgr = null;
+        Long2ReferenceMap<RenderSection> sectionMap = null;
+        if (sodium != null) {
+            mgr = ((AccessorSodiumWorldRenderer) sodium).getRenderSectionManager();
+            if (mgr != null) {
+                sectionMap = ((AccessorRenderSectionManager) mgr).getSectionByPosition();
+            }
+        }
+
+        int totalTracked = tracked.length;
+        int withinRadius = 0;
+        int orphanCount = 0;
+        int phantomCount = 0;
+        int invisibleCount = 0;
+        int ringMin = Math.max(0, rd - 2);
+        int ringMax = rd + 3;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== /voxy dumpbounds ===\n");
+        sb.append("playerSection=(").append(pcx).append(',').append(pcy).append(',').append(pcz).append(')')
+                .append(" effectiveRD=").append(rd)
+                .append(" radius=").append(radius)
+                .append(" totalTracked=").append(totalTracked)
+                .append(" sodiumAvail=").append(sodium != null)
+                .append(" sectionMapAvail=").append(sectionMap != null).append('\n');
+        sb.append("Sodium flags: bit0=BLOCK_GEOMETRY, bit1=BLOCK_ENTITIES, bit2=ANIMATED_SPRITES.\n");
+        sb.append("ORPHAN = tracked but Sodium has no built section. PHANTOM = built but flags=0 or NO BLOCK_GEOMETRY -> AABB writes depth without vanilla pixels behind it (likely cause of invisible LOD).\n");
+
+        int shown = 0;
+        for (long pos : tracked) {
+            int sx = SectionPos.x(pos);
+            int sy = SectionPos.y(pos);
+            int sz = SectionPos.z(pos);
+            int dx = sx - pcx;
+            int dz = sz - pcz;
+            int dy = sy - pcy;
+            int chebXZ = Math.max(Math.abs(dx), Math.abs(dz));
+            if (chebXZ > radius) continue;
+            withinRadius++;
+            boolean sodiumBuilt = sodium == null || sodium.isSectionReady(sx, sy, sz);
+            boolean sodiumVisible = mgr == null || mgr.isSectionVisible(sx, sy, sz);
+            int flags = -1;
+            if (sectionMap != null) {
+                RenderSection rs = sectionMap.get(pos);
+                if (rs != null) flags = rs.getFlags();
+            }
+            boolean hasBlockGeo = flags > 0 && (flags & 1) != 0;
+            boolean inRing = chebXZ >= ringMin && chebXZ <= ringMax;
+            String tag;
+            if (sodium != null && !sodiumBuilt) {
+                tag = "ORPHAN";
+                orphanCount++;
+            } else if (sectionMap != null && sodiumBuilt && !hasBlockGeo) {
+                tag = "PHANTOM";
+                phantomCount++;
+            } else if (mgr != null && !sodiumVisible) {
+                tag = "INVISIBLE";
+                invisibleCount++;
+            } else if (inRing) {
+                tag = "EDGE";
+            } else {
+                tag = "";
+            }
+            sb.append("  (").append(sx).append(',').append(sy).append(',').append(sz).append(')')
+                    .append(" d=(").append(dx).append(',').append(dy).append(',').append(dz).append(')')
+                    .append(" chebXZ=").append(chebXZ)
+                    .append(" built=").append(sodiumBuilt)
+                    .append(" visible=").append(sodiumVisible)
+                    .append(" flags=").append(flags);
+            if (!tag.isEmpty()) sb.append(' ').append(tag);
+            sb.append('\n');
+            shown++;
+        }
+        sb.append("withinRadius=").append(withinRadius)
+                .append(" shown=").append(shown)
+                .append(" orphans=").append(orphanCount)
+                .append(" phantoms=").append(phantomCount)
+                .append(" invisible=").append(invisibleCount);
+
+        String dump = sb.toString();
+        Logger.info(dump);
+        ctx.getSource().sendSystemMessage(Component.literal(
+                "dumpbounds: tracked=" + totalTracked + " withinRadius=" + withinRadius
+                        + " orphans=" + orphanCount + " phantoms=" + phantomCount
+                        + " invisible=" + invisibleCount + " (full output in log)"));
+        return 0;
     }
 
     // Diagnosis tool for the phantom-occlusion bug (see ChunkBoundRenderer.java).

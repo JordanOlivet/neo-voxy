@@ -17,6 +17,7 @@
     "minecraft.MixinWindow",
     "minecraft.MixinLayerLightSectionStorage",
     "sodium.AccessorChunkTracker",
+    "sodium.AccessorRenderSectionManager",
     "sodium.AccessorSodiumWorldRenderer",
     "sodium.MixinChunkJobQueue",
     "sodium.MixinDefaultChunkRenderer",

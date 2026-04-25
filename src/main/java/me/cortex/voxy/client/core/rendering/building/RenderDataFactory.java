@@ -145,10 +145,16 @@ public class RenderDataFactory {
             MemoryUtil.memPutLong(RenderDataFactory.this.quadBufferPtr + bufferOffset, quad);
 
 
-            //Update AABB bounds
+            // Update AABB bounds — convention: min inclusive, max exclusive, extent = max-min ∈ [1,32].
+            // Resolved (2026-04-21): normal-axis max was previously set to auxPos (inclusive) while
+            // tangent-axis max used +length/+width (exclusive), giving extent=0 for planar geometry
+            // (single-plane walls, floors, bedrock layers). The 0 extent underflowed the
+            // `(max-min-1)<<shift` encoding to -1, corrupting neighboring bit fields in the packed
+            // AABB and making affected LOD chunks render at a broken AABB (invisible at certain
+            // camera positions). Fix: auxPos+1 on the normal axis, consistent exclusive max everywhere.
             if (axis == 0) {//Y
                 RenderDataFactory.this.minY = Math.min(RenderDataFactory.this.minY, auxPos);
-                RenderDataFactory.this.maxY = Math.max(RenderDataFactory.this.maxY, auxPos);
+                RenderDataFactory.this.maxY = Math.max(RenderDataFactory.this.maxY, auxPos + 1);
 
                 RenderDataFactory.this.minX = Math.min(RenderDataFactory.this.minX, x);
                 RenderDataFactory.this.maxX = Math.max(RenderDataFactory.this.maxX, x + length);
@@ -157,7 +163,7 @@ public class RenderDataFactory {
                 RenderDataFactory.this.maxZ = Math.max(RenderDataFactory.this.maxZ, z + width);
             } else if (axis == 1) {//Z
                 RenderDataFactory.this.minZ = Math.min(RenderDataFactory.this.minZ, auxPos);
-                RenderDataFactory.this.maxZ = Math.max(RenderDataFactory.this.maxZ, auxPos);
+                RenderDataFactory.this.maxZ = Math.max(RenderDataFactory.this.maxZ, auxPos + 1);
 
                 RenderDataFactory.this.minX = Math.min(RenderDataFactory.this.minX, x);
                 RenderDataFactory.this.maxX = Math.max(RenderDataFactory.this.maxX, x + length);
@@ -166,7 +172,7 @@ public class RenderDataFactory {
                 RenderDataFactory.this.maxY = Math.max(RenderDataFactory.this.maxY, z + width);
             } else {//X
                 RenderDataFactory.this.minX = Math.min(RenderDataFactory.this.minX, auxPos);
-                RenderDataFactory.this.maxX = Math.max(RenderDataFactory.this.maxX, auxPos);
+                RenderDataFactory.this.maxX = Math.max(RenderDataFactory.this.maxX, auxPos + 1);
 
                 RenderDataFactory.this.minY = Math.min(RenderDataFactory.this.minY, x);
                 RenderDataFactory.this.maxY = Math.max(RenderDataFactory.this.maxY, x + length);
@@ -1561,6 +1567,13 @@ public class RenderDataFactory {
 
     //section is already acquired and gets released by the parent
     public BuiltSection generateMesh(WorldSection section) {
+        //Ingestion gate: skip sections that haven't yet received at least one VoxelizedSection ingest
+        // in each of their 8 octants. Meshing a partially-ingested section produces sparse geometry
+        // that renders as visually-transparent chunks at LOD distance.
+        if (!section.isFullyIngested()) {
+            return BuiltSection.emptyWithChildren(section.key, section.getNonEmptyChildren());
+        }
+
         //TODO: FIXME: because of the exceptions that are thrown when aquiring modelId
         // this can result in the state of all block meshes and well _everything_ from being incorrect
         //THE EXCEPTION THAT THIS THROWS CAUSES MAJOR ISSUES

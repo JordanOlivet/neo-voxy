@@ -294,6 +294,16 @@ public class ChunkBoundRenderer {
         this.chunk2idx.clear();
     }
 
+    //Debug: snapshot of currently tracked section positions (SectionPos.asLong keys).
+    //Includes pending adds, excludes pending removes — matches what the next render() will rasterize.
+    public long[] _debugGetTrackedPositions() {
+        LongOpenHashSet out = new LongOpenHashSet(this.chunk2idx.size() + this.addQueue.size());
+        out.addAll(this.chunk2idx.keySet());
+        out.addAll(this.addQueue);
+        out.removeAll(this.remQueue);
+        return out.toLongArray();
+    }
+
     public void free() {
         this.rasterShader.free();
         this.uniformBuffer.free();

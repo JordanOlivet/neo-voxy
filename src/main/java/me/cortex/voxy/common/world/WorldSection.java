@@ -21,6 +21,7 @@ public final class WorldSection {
     private static final VarHandle NON_EMPTY_BLOCK_HANDLE;
     private static final VarHandle IN_SAVE_QUEUE_HANDLE;
     private static final VarHandle IS_DIRTY_HANDLE;
+    private static final VarHandle INGESTED_OCTANT_HANDLE;
 
     static {
         try {
@@ -29,6 +30,7 @@ public final class WorldSection {
             NON_EMPTY_BLOCK_HANDLE = MethodHandles.lookup().findVarHandle(WorldSection.class, "nonEmptyBlockCount", int.class);
             IN_SAVE_QUEUE_HANDLE = MethodHandles.lookup().findVarHandle(WorldSection.class, "inSaveQueue", boolean.class);
             IS_DIRTY_HANDLE = MethodHandles.lookup().findVarHandle(WorldSection.class, "isDirty", boolean.class);
+            INGESTED_OCTANT_HANDLE = MethodHandles.lookup().findVarHandle(WorldSection.class, "ingestedOctantMask", byte.class);
         } catch (NoSuchFieldException | IllegalAccessException e) {
             throw new RuntimeException(e);
         }
@@ -54,6 +56,11 @@ public final class WorldSection {
     long[] data = null;
     volatile int nonEmptyBlockCount = 0;//Note: only needed for level 0 sections
     volatile byte nonEmptyChildren;
+    //Bitmask of which of the 8 octants (2x2x2 halves) of this section have received at least one
+    // VoxelizedSection ingest. Mesh generation is gated on this reaching 0xFF to avoid rendering
+    // transparent sections while ingestion is still progressing. Set to 0xFF directly when loaded
+    // from disk (deserialize fills all 32768 voxel slots).
+    volatile byte ingestedOctantMask;
 
     final ActiveSectionTracker tracker;
     volatile boolean inSaveQueue;
@@ -272,6 +279,34 @@ public final class WorldSection {
 
     public void _unsafeSetNonEmptyChildren(byte nonEmptyChildren) {
         NON_EMPTY_CHILD_HANDLE.set(this, nonEmptyChildren);
+    }
+
+    //Marks the given octant (0..7, layout: (x&1) | ((z&1)<<1) | ((y&1)<<2)) as having received at
+    // least one ingest. Monotonic (bits only set, never cleared). Returns true iff this call was
+    // the one that transitioned the mask to fully-ingested (0xFF).
+    public boolean markOctantIngested(int octantIdx) {
+        byte bit = (byte) (1 << (octantIdx & 7));
+        byte prev, next;
+        do {
+            prev = (byte) INGESTED_OCTANT_HANDLE.get(this);
+            next = (byte) (prev | bit);
+            if (prev == next) return false;
+        } while (!INGESTED_OCTANT_HANDLE.compareAndSet(this, prev, next));
+        return (next & 0xFF) == 0xFF && (prev & 0xFF) != 0xFF;
+    }
+
+    public boolean isFullyIngested() {
+        return ((byte) INGESTED_OCTANT_HANDLE.get(this)) == (byte) 0xFF;
+    }
+
+    public byte getIngestedOctantMask() {
+        return (byte) INGESTED_OCTANT_HANDLE.get(this);
+    }
+
+    //Used by the disk-load path: deserialize writes all 32768 slots so the section is immediately
+    // complete regardless of whether VoxelIngestService has caught up.
+    public void _unsafeSetFullyIngested() {
+        INGESTED_OCTANT_HANDLE.set(this, (byte) 0xFF);
     }
 
     public static WorldSection _createRawUntrackedUnsafeSection(int lvl, int x, int y, int z) {
