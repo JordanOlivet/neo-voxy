@@ -63,7 +63,13 @@ import static org.lwjgl.opengl.GL11.*;
 //TODO: NOTE!!! is it worth even uploading as a 16x16 texture, since automatic lod selection... doing 8x8 textures might be perfectly ok!!!
 // this _quarters_ the memory requirements for the texture atlas!!! WHICH IS HUGE saving
 public class ModelFactory {
-    public static final int MODEL_TEXTURE_SIZE = 16;
+    // Resolved (2026-04-28): step 5 — atlas downscaled 16→8.
+    // VRAM atlas: 512 MiB → 128 MiB (-384 MiB). Per-face occlusion mask shrinks
+    // from 256 bits (4 longs) to 64 bits (1 long), heap cache 12 MiB → 3 MiB.
+    // Auto-LOD selection in the sampler picks mip 1+ at typical Voxy distances,
+    // so the lost mip-0 detail is rarely visible. If a regression is reported,
+    // bump back to 16 here and OCCLUSION_MASK_LONGS_PER_FACE to 4.
+    public static final int MODEL_TEXTURE_SIZE = 8;
 
     // TODO: replace the fluid BlockState with a client model id integer of the
     // fluidState, requires looking up
@@ -126,8 +132,8 @@ public class ModelFactory {
     // this has an issue with scaffolding i believe tho, so maybe make it a
     // probability to render??? idk
     private final long[] metadataCache;
-    public static final int OCCLUSION_MASK_LONGS_PER_FACE = 4;//16x16 bits = 256 bits = 4 longs
-    private static final int OCCLUSION_MASK_LONGS_PER_BLOCKSTATE = 6 * OCCLUSION_MASK_LONGS_PER_FACE;//24
+    public static final int OCCLUSION_MASK_LONGS_PER_FACE = 1;//8x8 bits = 64 bits = 1 long (was 4 at MODEL_TEXTURE_SIZE=16)
+    private static final int OCCLUSION_MASK_LONGS_PER_BLOCKSTATE = 6 * OCCLUSION_MASK_LONGS_PER_FACE;//6
     private final long[] faceOcclusionMaskCache;
     private final int[] fluidStateLUT;
 
@@ -586,25 +592,19 @@ public class ModelFactory {
             metadata |= occludesFace ? 1 : 0;
             fullyOpaque &= occludesFace;
 
-            // Per-face 16x16 = 256-bit pixel coverage mask, packed in 4 longs.
+            // Per-face 8x8 = 64-bit pixel coverage mask, packed in 1 long.
             // Mirrors `occludesFace` semantics: empty mask if face doesn't occlude
-            // (translucent or far-from-flush), otherwise bit (x + y*16) = pixel written.
+            // (translucent or far-from-flush), otherwise bit (x + y*8) = pixel written.
             {
-                long m0 = 0, m1 = 0, m2 = 0, m3 = 0;
+                long m0 = 0;
                 if (occludesFace) {
                     final var faceTex = textureData[face];
-                    for (int idx = 0; idx < 64; idx++) {
-                        if (TextureUtils.wasPixelWritten(faceTex, checkMode, idx))     m0 |= 1L << idx;
-                        if (TextureUtils.wasPixelWritten(faceTex, checkMode, idx + 64))  m1 |= 1L << idx;
-                        if (TextureUtils.wasPixelWritten(faceTex, checkMode, idx + 128)) m2 |= 1L << idx;
-                        if (TextureUtils.wasPixelWritten(faceTex, checkMode, idx + 192)) m3 |= 1L << idx;
+                    for (int idx = 0; idx < MODEL_TEXTURE_SIZE * MODEL_TEXTURE_SIZE; idx++) {
+                        if (TextureUtils.wasPixelWritten(faceTex, checkMode, idx)) m0 |= 1L << idx;
                     }
                 }
                 int maskBase = (modelId * 6 + face) * OCCLUSION_MASK_LONGS_PER_FACE;
-                this.faceOcclusionMaskCache[maskBase]     = m0;
-                this.faceOcclusionMaskCache[maskBase + 1] = m1;
-                this.faceOcclusionMaskCache[maskBase + 2] = m2;
-                this.faceOcclusionMaskCache[maskBase + 3] = m3;
+                this.faceOcclusionMaskCache[maskBase] = m0;
             }
 
             boolean canBeOccluded = true;
@@ -1015,31 +1015,24 @@ public class ModelFactory {
         return this.metadataCache[clientId];
     }
 
-    //Per-face 16x16 pixel opacity mask, 4 longs per face. longIdx 0..3 covers pixels
-    // 0..63, 64..127, 128..191, 192..255 where pixel index = x + y*16. Empty mask
-    // means face does not occlude (translucent / far-from-flush / face absent).
-    public long getFaceOcclusionMaskLong(int clientId, int face, int longIdx) {
-        return this.faceOcclusionMaskCache[(clientId * 6 + face) * OCCLUSION_MASK_LONGS_PER_FACE + longIdx];
+    //Per-face 8x8 pixel opacity mask, 1 long per face. Pixel index = x + y*8. Empty
+    // mask means face does not occlude (translucent / far-from-flush / face absent).
+    public long getFaceOcclusionMaskLong(int clientId, int face) {
+        return this.faceOcclusionMaskCache[(clientId * 6 + face) * OCCLUSION_MASK_LONGS_PER_FACE];
     }
 
     //True iff every set pixel of `selfFace` of `selfClientId` is also set in
     // `neighborFace` of `neighborClientId`. Use to decide if `selfFace` is fully
-    // hidden by the neighbor's facing-back face. Both ids must be valid (>=0).
+    // hidden by the neighbor's facing-back face. Empty self mask returns false —
+    // caller should pre-check via faceOccludes/faceExists if a different fallback
+    // is needed (the OR'd legacy check in RenderDataFactory.isFaceCoveredByNeighbor
+    // handles the empty-self case).
     public boolean isFaceFullyOccludedBy(int selfClientId, int selfFace, int neighborClientId, int neighborFace) {
         int sBase = (selfClientId * 6 + selfFace) * OCCLUSION_MASK_LONGS_PER_FACE;
         int nBase = (neighborClientId * 6 + neighborFace) * OCCLUSION_MASK_LONGS_PER_FACE;
         long s0 = this.faceOcclusionMaskCache[sBase];
         if ((s0 & ~this.faceOcclusionMaskCache[nBase]) != 0L) return false;
-        long s1 = this.faceOcclusionMaskCache[sBase + 1];
-        if ((s1 & ~this.faceOcclusionMaskCache[nBase + 1]) != 0L) return false;
-        long s2 = this.faceOcclusionMaskCache[sBase + 2];
-        if ((s2 & ~this.faceOcclusionMaskCache[nBase + 2]) != 0L) return false;
-        long s3 = this.faceOcclusionMaskCache[sBase + 3];
-        if ((s3 & ~this.faceOcclusionMaskCache[nBase + 3]) != 0L) return false;
-        //All-empty self mask is trivially "fully occluded" — caller should typically
-        // pre-check via the existing faceOccludes/faceExists helpers to avoid culling
-        // a non-existent face.
-        return (s0 | s1 | s2 | s3) != 0L;
+        return s0 != 0L;
     }
 
     private static int computeSizeWithMips(int size) {

@@ -335,10 +335,18 @@ Deux bugs latents identifiés lors de l'analyse du phantom occlusion :
     - Cas spéciaux : vines, glow lichen (`475`), faces orientées par
       alignment-depth (`531`), feuilles avec AO (`653`).
 
-    **(e) Atlas / mémoire** (`ModelFactory:155-158,996-1029`)
-    - Question ouverte : passer textures modèle 16×16 → 8×8 (quart VRAM
-      atlas). Vérification visuelle nécessaire (LOD selection auto).
-    - Blits de baking non batchés (6 blits séparés) → CPU/GPU sync overhead.
+    **(e) Atlas / mémoire** (`ModelFactory:155-158,996-1029`) [FAIT 2026-04-28]
+    - **FAIT 2026-04-28** : `MODEL_TEXTURE_SIZE` 16 → 8. Gain VRAM atlas :
+      512 MiB → 128 MiB (-384 MiB, l'allocation GPU dominante de Voxy). Heap
+      `faceOcclusionMaskCache` : 12 MiB → 3 MiB. Bake CPU ~4× plus rapide
+      (4× moins de pixels par face). `OCCLUSION_MASK_LONGS_PER_FACE` 4 → 1
+      (8×8=64 bits tient dans un long), `isFaceFullyOccludedBy` simplifié à
+      un seul AND-NOT. Build clean.
+    - **Risque visuel** : à LOD0 (premier ring après RD vanilla, le plus
+      proche), le mip-0 perdu peut être visible. Aux LOD1+, invisible (le
+      sampler choisit déjà mip 1+ à distance). À tester en jeu.
+    - **Reste ouvert** : blits de baking non batchés (6 blits séparés) →
+      CPU/GPU sync overhead. Hors scope (perf marginale, complexité élevée).
 
     **(f) Géométrie inter-section** (`RenderDataFactory:679,873,1075`) [VERIFIE 2026-04-25]
     - Vérification du code : les TODOs sont des notes de vérification stale, pas
@@ -364,7 +372,7 @@ Deux bugs latents identifiés lors de l'analyse du phantom occlusion :
     | 2 | Self-occlusion correcte (regrouper TODOs) | (b) | PARTIEL 2026-04-25 (6 TODOs résolus en notes ; fix réel bloqué sur étape 4 ; bug stained glass L.21/L.350 laissé intact, demande reproduction runtime) |
     | 3 | Lighting per-vertex pour fluides + opaques non-cull → résout aussi item 14 (grille eau) | (c) | REPORTÉ 2026-04-25 (vrai fix = refactor pipeline géométrie+shader, pas TODO sweep ; 5 sites résolus en notes ; cause racine du item 14 confirmée mais pas adressée) |
     | 4 | Opaque mask par face (16×16 bits) → débloque transparence propre + occlusion fine | (a) | FAIT 2026-04-27 (infrastructure + wiring : 8/14 callsites — opaque/non-opaque ; 5 sites fluide intentionnellement skippés car self.mask vide → no-op ; documenté in-line) |
-    | 5 | Atlas 8×8 (perf/mémoire pure) | (e) | TODO |
+    | 5 | Atlas 8×8 (perf/mémoire pure) | (e) | FAIT 2026-04-28 (-384 MiB VRAM atlas, -9 MiB heap mask cache, bake ~4× plus rapide ; vérif visuelle in-game à faire à LOD0) |
 
     Note : famille (d) blocs spéciaux est traitée opportunistiquement au fil
     des étapes 2-4 selon les cas qu'elles débloquent.
