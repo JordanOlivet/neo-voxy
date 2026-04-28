@@ -106,10 +106,11 @@ public class ModelFactory {
     // will need to find a way to send this info to the shader via the material, if
     // it is in the opaque phase render as transparent with blending shiz
 
-    // TODO: ADD an occlusion mask that can be queried (16x16 pixels takes up 4
-    // longs) this mask shows what pixels are exactly occluded at the edge of the
-    // block
-    // so that full block occlusion can work nicely
+    // Resolved (2026-04-27): faceOcclusionMaskCache stores the 16x16 = 256-bit
+    // per-face opacity mask packed in 4 longs per face (24 longs per blockstate).
+    // Mirrors the current per-face faceOccludes bit (translucent / offset>=0.1 →
+    // empty mask) but at per-pixel granularity. Wiring into RenderDataFactory
+    // callsites is a separate follow-up — see ANALYSIS.md item 11 step 4.
 
     // TODO: what might work maybe, is that all the transparent pixels should be set
     // to the average of the other pixels
@@ -125,6 +126,9 @@ public class ModelFactory {
     // this has an issue with scaffolding i believe tho, so maybe make it a
     // probability to render??? idk
     private final long[] metadataCache;
+    public static final int OCCLUSION_MASK_LONGS_PER_FACE = 4;//16x16 bits = 256 bits = 4 longs
+    private static final int OCCLUSION_MASK_LONGS_PER_BLOCKSTATE = 6 * OCCLUSION_MASK_LONGS_PER_FACE;//24
+    private final long[] faceOcclusionMaskCache;
     private final int[] fluidStateLUT;
 
     // Provides a map from id -> model id as multiple ids might have the same
@@ -162,6 +166,7 @@ public class ModelFactory {
         this.bakery = new ModelTextureBakery(MODEL_TEXTURE_SIZE, MODEL_TEXTURE_SIZE);
 
         this.metadataCache = new long[1 << 16];
+        this.faceOcclusionMaskCache = new long[(1 << 16) * OCCLUSION_MASK_LONGS_PER_BLOCKSTATE];
         this.fluidStateLUT = new int[1 << 16];
         this.idMappings = new int[1 << 20];// Max of 1 million blockstates mapping to 65k model states
         Arrays.fill(this.idMappings, -1);
@@ -389,7 +394,14 @@ public class ModelFactory {
         this.blockStatesInFlightLock.unlock();
 
         // TODO: add thing for `blockState.hasEmissiveLighting()` and
-        // `blockState.getLuminance()`
+        // `blockState.getLuminance()`.
+        // Note (2026-04-27): the per-face faceUsesSelfLighting bit (0b1000) IS
+        // set later in this method as `(offset > 0.01 || translucent) ? 0b1000 : 0`
+        // — so cake/lantern-shaped or translucent faces already self-light. What's
+        // still missing here is the explicit emissive path: full-cube emissive
+        // blocks (glowstone, magma, sea lantern) fall through both gates because
+        // they have offset≈0 and aren't translucent → they pull lighting from a
+        // neighbor air voxel instead of self-lighting at LOD distance.
 
         boolean isFluid = blockState.getBlock() instanceof LiquidBlock;
         int modelId = -1;
@@ -573,6 +585,27 @@ public class ModelFactory {
             }
             metadata |= occludesFace ? 1 : 0;
             fullyOpaque &= occludesFace;
+
+            // Per-face 16x16 = 256-bit pixel coverage mask, packed in 4 longs.
+            // Mirrors `occludesFace` semantics: empty mask if face doesn't occlude
+            // (translucent or far-from-flush), otherwise bit (x + y*16) = pixel written.
+            {
+                long m0 = 0, m1 = 0, m2 = 0, m3 = 0;
+                if (occludesFace) {
+                    final var faceTex = textureData[face];
+                    for (int idx = 0; idx < 64; idx++) {
+                        if (TextureUtils.wasPixelWritten(faceTex, checkMode, idx))     m0 |= 1L << idx;
+                        if (TextureUtils.wasPixelWritten(faceTex, checkMode, idx + 64))  m1 |= 1L << idx;
+                        if (TextureUtils.wasPixelWritten(faceTex, checkMode, idx + 128)) m2 |= 1L << idx;
+                        if (TextureUtils.wasPixelWritten(faceTex, checkMode, idx + 192)) m3 |= 1L << idx;
+                    }
+                }
+                int maskBase = (modelId * 6 + face) * OCCLUSION_MASK_LONGS_PER_FACE;
+                this.faceOcclusionMaskCache[maskBase]     = m0;
+                this.faceOcclusionMaskCache[maskBase + 1] = m1;
+                this.faceOcclusionMaskCache[maskBase + 2] = m2;
+                this.faceOcclusionMaskCache[maskBase + 3] = m3;
+            }
 
             boolean canBeOccluded = true;
             // TODO: make this an option on how far/close
@@ -980,6 +1013,33 @@ public class ModelFactory {
 
     public long getModelMetadataFromClientId(int clientId) {
         return this.metadataCache[clientId];
+    }
+
+    //Per-face 16x16 pixel opacity mask, 4 longs per face. longIdx 0..3 covers pixels
+    // 0..63, 64..127, 128..191, 192..255 where pixel index = x + y*16. Empty mask
+    // means face does not occlude (translucent / far-from-flush / face absent).
+    public long getFaceOcclusionMaskLong(int clientId, int face, int longIdx) {
+        return this.faceOcclusionMaskCache[(clientId * 6 + face) * OCCLUSION_MASK_LONGS_PER_FACE + longIdx];
+    }
+
+    //True iff every set pixel of `selfFace` of `selfClientId` is also set in
+    // `neighborFace` of `neighborClientId`. Use to decide if `selfFace` is fully
+    // hidden by the neighbor's facing-back face. Both ids must be valid (>=0).
+    public boolean isFaceFullyOccludedBy(int selfClientId, int selfFace, int neighborClientId, int neighborFace) {
+        int sBase = (selfClientId * 6 + selfFace) * OCCLUSION_MASK_LONGS_PER_FACE;
+        int nBase = (neighborClientId * 6 + neighborFace) * OCCLUSION_MASK_LONGS_PER_FACE;
+        long s0 = this.faceOcclusionMaskCache[sBase];
+        if ((s0 & ~this.faceOcclusionMaskCache[nBase]) != 0L) return false;
+        long s1 = this.faceOcclusionMaskCache[sBase + 1];
+        if ((s1 & ~this.faceOcclusionMaskCache[nBase + 1]) != 0L) return false;
+        long s2 = this.faceOcclusionMaskCache[sBase + 2];
+        if ((s2 & ~this.faceOcclusionMaskCache[nBase + 2]) != 0L) return false;
+        long s3 = this.faceOcclusionMaskCache[sBase + 3];
+        if ((s3 & ~this.faceOcclusionMaskCache[nBase + 3]) != 0L) return false;
+        //All-empty self mask is trivially "fully occluded" — caller should typically
+        // pre-check via the existing faceOccludes/faceExists helpers to avoid culling
+        // a non-existent face.
+        return (s0 | s1 | s2 | s3) != 0L;
     }
 
     private static int computeSizeWithMips(int size) {

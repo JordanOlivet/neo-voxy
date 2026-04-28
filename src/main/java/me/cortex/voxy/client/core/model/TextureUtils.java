@@ -26,7 +26,7 @@ public class TextureUtils {
     public static final int WRITE_CHECK_STENCIL = 1;
     public static final int WRITE_CHECK_DEPTH = 2;
     public static final int WRITE_CHECK_ALPHA = 3;
-    private static boolean wasPixelWritten(ColourDepthTextureData data, int mode, int index) {
+    static boolean wasPixelWritten(ColourDepthTextureData data, int mode, int index) {
         if (mode == WRITE_CHECK_STENCIL) {
             return (data.depth()[index]&0xFF)!=0;
         } else if (mode == WRITE_CHECK_DEPTH) {
