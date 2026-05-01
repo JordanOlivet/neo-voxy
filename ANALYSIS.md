@@ -588,3 +588,290 @@ Toutes les incohérences ci-dessous ont été corrigées :
 1. Ajouter des tests au minimum sur la serialization/deserialization
 2. Tester les differents backends de stockage
 3. Tester la compatibilite avec differents shader packs
+
+---
+
+## 9. Audits préparatoires pour gros chantiers (2026-05-01)
+
+Audits réalisés à froid pour fournir une vision complète avant engagement.
+**Pas d'implémentation faite — ces sections servent de point de départ quand
+on lance les chantiers correspondants.** Toute info datant de >3 mois doit
+être re-vérifiée contre l'état du code (pointeurs de ligne susceptibles d'avoir
+glissé).
+
+### 9.A Refactor per-vertex lighting (item 11(c) → débloque item 14)
+
+#### Format géométrique actuel
+
+Layout du long quad (64 bits) :
+```
+[0:3]    face       (3 bits)   6 faces
+[3:7]    width-1    (4 bits)   taille Y du quad (1-16)
+[7:11]   length-1   (4 bits)   taille X du quad (1-16)
+[11:16]  z          (5 bits)   coord Z locale (0-31)
+[16:21]  y          (5 bits)   coord Y locale (0-31)
+[21:26]  x          (5 bits)   coord X locale (0-31)
+[26:42]  modelId    (16 bits)
+[42:46]  type/flags (4 bits)   translucent | doubleSided | directional
+[46:55]  biomeId    (9 bits)
+[55:63]  lightId    (8 bits)   FLAT, sky(low4) + block(high4)
+[63:64]  unused     (1 bit)
+```
+
+**État : saturé** — 63/64 bits utilisés. Constante repère :
+`RenderDataFactory.LM = (0xFFL<<55)`. Côté shader :
+`quad_format.glsl` `extractLightId(quad) = Eu32(quad, 8, 55)`.
+
+#### Pipeline shader actuel (flat per-quad)
+
+`src/main/resources/assets/voxy/shaders/lod/gl46/quads2.vert` :
+- L.17 : `layout(location=0) out flat uvec4 interData;` → **flat**, pas d'interpolation.
+- L.126-138 : sample uniquement à `cornerIdx == 1` (provoking vertex).
+  ```glsl
+  if (cornerIdx == 1) {
+      vec4 tinting = getLighting(extractLightId(quad));
+      interData.y = packVec4(tinting);
+  }
+  ```
+- LUT lighting : `gl46/bindings.glsl:99-102`, sampler 16×16 RGBA, 256 indices max.
+
+Autres shaders touchés à la transition :
+- `quads2.vert` (principal opaque + fluid + non-opaque)
+- `quad_util.glsl:77`, `gl46/bindings.glsl:99`, `nvmesh/bindings.glsl:58`
+- Branche Iris `#ifdef PATCHED_SHADER` dans `quads2.vert:157-202` (à conserver
+  en fallback).
+
+#### Sites à modifier dans RenderDataFactory.java (~15 putNext)
+
+Au moment de l'audit (à re-vérifier) :
+- Opaque YZ : L.~456 (inner), L.~532 (outer)
+- Fluid YZ : L.~626 (inner), L.~711 (outer)
+- Non-opaque YZ : L.~870, L.~878 (boundary dual)
+- Opaque X : L.~1036 (inner), L.~1103, L.~1129 (outer)
+- Fluid X : L.~1258 (inner), L.~1364, L.~1425 (outer)
+- Non-opaque X : `meshNonOpaqueFace` indirection (L.~1515-1620)
+
+Pattern actuel à chaque site :
+```java
+mesher.putNext(facing | modelData |
+    ((ModelQueries.faceUsesSelfLighting(meta, face)?quad:neighborQuad) & LM));
+```
+→ doit devenir une émission per-corner (4 lookups voxels voisins, pack en 32 bits).
+
+#### Impact ScanMesher2D (greedy merge)
+
+`ScanMesher2D.java` L.44, L.66 : merge sur égalité stricte du long entier
+(lighting inclus). Avec 4 corners potentiellement différents, l'égalité devient
+rare → quad count peut grimper.
+
+Trois options :
+- **(a) Ignore lighting in merge** : `(data & ~LM) == (current & ~LM)`.
+  Quad count attendu : eau uniforme -5%, hétérogène +0%, eau ciel-variant +5-15%
+  worst-case. **Recommandé.**
+- **(b) Per-corner equality gate** : refactor scanline pour checker 2D
+  neighbors. Invasif.
+- **(c) Garder flat data, shader interpole 4 corners implicitement** : zero
+  changement mesher mais perd la précision per-vertex réelle.
+
+#### Source des 4 corners
+
+`WorldSection.data[32*32*32]` + `RenderDataFactory.neighboringFaces[32*32*6]`
+suffisent à accéder aux 4 voxels voisins par coin (architecture déjà capable
+intra-section + inter-section).
+
+`Mipper.java` : déjà fixé (2026-04-19, 2026-04-20) pour `maxLight()` correct.
+Pas de retravail Mipper requis.
+
+#### Coût buffer GPU
+
+`RenderDataFactory.quadBuffer = new MemoryBuffer(8*(8*(1<<16)))` = 4 MB par
+buffer. Passage à 2 longs/quad → **8 MB par buffer (+100%)**. Sur une 512³ LOD
+region (~500 sections × 50k quads typiques) : **+100-400 MB VRAM total**.
+Acceptable sur GPU 2024+ (RTX 4070+ : 12 GB), tight sur RTX 3060.
+
+#### Risques
+
+- **Iris** : risque principal. Changer `flat` → `smooth` peut casser la
+  compilation BSL/Photon/Complementary. Mitigation : conserver branche
+  `#ifdef PATCHED_SHADER` en fallback flat. Tester ces 3 packs en priorité.
+- **Sodium** : risque nul (mixins ne touchent pas le format quad LOD).
+- **Régressions visuelles** : light banding aux seams si sampling inconsistent.
+
+#### Item 14 (water grid) — fix complet
+
+Cause double :
+- (a) UV locales reset à chaque quad (`quads2.vert` L.108-111 : `uv = faceSize.xz + cQuadSize`).
+- (b) Lighting structurellement flat per-quad → grille aux frontières de section.
+
+Fix per-vertex lighting résout **(b)**. Ajouter ~30 min de patch UV
+world-space (uniform `worldBasePos` + `uv = (worldPos.xz) * texelSize`)
+résout **(a)**. Faire les deux dans le même PR.
+
+#### Estimation effort / risque / gain
+
+| Axe | Niveau | Justification |
+|-----|--------|---------------|
+| Effort code | Moyen | 15 putNext + quads2.vert interp + quad_format.glsl + extractor + UV world. ~5-6h. |
+| Effort tests | Élevé | 3 packs Iris × eau/terrain × bandwidth = ~6h minimum. |
+| Risque régression | Moyen-élevé | Format change touche tous les LOD render. Iris orthogonal mais untested. Mitigable via fallback. |
+| Gain visuel | Élevé | Item 14 (water grid) résolu. Lighting LOD continu. |
+| Gain perf | Neutre (-5% worst) | +100% VRAM quad buffer. Smooth interp = ~2 lookups extra par fragment. |
+
+**Total : 13-16h** (5-6h code + 6h tests + 2-4h debug Iris si casse).
+
+#### Plan d'attaque suggéré
+
+1. Phase A (low risk) : extension format + RDF putNext. Compile sans Iris,
+   vérifier quad count regression < 15%.
+2. Phase B (medium risk) : shader per-vertex interp + fallback Iris.
+   Test BSL en jeu.
+3. Phase C : UV world-space (item 14 secondaire).
+4. Phase D (regression suite) : Photon + Complementary + bandwidth bench
+   (LOD0 vs LOD6) + activation fallback.
+
+---
+
+### 9.B État du sous-système serveur / format / protocole
+
+**Score audit : 7/10** — fonctionnel et correct, sans bug critique connu, mais
+clairement sous-optimisé sur la bande passante et l'évolutivité du protocole.
+
+#### Architecture côté serveur
+
+- `VoxyServer.java` : event handler principal NeoForge (ServerStartedEvent,
+  ChunkEvent.Load auto-ingest, LevelEvent.Load, ServerTickEvent.Post,
+  PlayerEvent.PlayerLoggedOutEvent, ServerStoppingEvent).
+- `VoxyServerInstance.java` : instance Voxy dédiée serveur, stockage dans
+  `world/voxy/` (vs `.minecraft/voxy/` côté client). Backend par défaut :
+  RocksDB + LZ4.
+- `VoxyServerCommands.java` : `/voxyadmin` (status, generate radius, keep,
+  cancel, broadcast).
+- `ChunkFileProcessor.java` : génération LOD non-bloquante (10 chunks/tick).
+- Cycle de vie : `WorldEngine` créé par dimension à la première sync, gardé
+  vivant par `acquireRef()`/`releaseRef()` du `LodStreamingService`.
+
+#### Protocole réseau
+
+Channel : `voxy:lod_sync`, payload `VoxyPacketPayload(byte type + byte[] data)`,
+**version "1" hardcodée** (pas de versioning dans le payload).
+`.optional()` → fallback gracieux si client absent.
+
+| Type | Const | Direction | Rôle | Payload typique |
+|------|-------|-----------|------|-----------------|
+| 0 | MAPPER_SYNC | S→C | Sync table mapping block/biome | 5-20 KB |
+| 1 | LOD_SECTION | S→C | Section LOD complète (petite) | sérialisée |
+| 2 | LOD_CHUNK | S→C | Chunk d'une section large | 9 + ≤65536 B |
+| 3 | CACHE_QUERY | S→C | Demande inventaire client | delta-encoded keys |
+| 4 | CACHE_RESPONSE | C→S | Réponse bloom filter | ~1.25 MB pour 100k |
+| 5 | RATE_UPDATE | C→S | Rate congestion control client | 4 B int |
+| 6 | SYNC_REQUEST | C→S | Demande initiale | (vide) |
+| 7 | SYNC_COMPLETE | S→C | Fin streaming | (vide) |
+| 8 | REQUEST_SECTIONS | C→S | **Deprecated** pull mode | ignoré serveur |
+
+Optimisations actives :
+- Delta-encoding sur listes de keys (`VoxyPacketPayload` L.197-218), max
+  2000 keys par requête / 10000 par cache query.
+- BloomFilter client persisté entre sessions (~1% FP rate).
+- `SharedBandwidthLimit` : 10240 KB/s global, 1024 KB/s per-player, fair-sharing.
+- `ChunkedLodSender` : 64 KB chunks (latence basse), 9 B header
+  (sectionId + offset + isLast), tickrate-based send.
+
+#### Streaming LOD
+
+Mode : **server-driven push** (pas de pull).
+- Sélection ring-based depuis position joueur, expansion ring 0 → ∞ jusqu'à
+  5 rings consécutifs vides (= maintenance mode, rescan toutes les 30s).
+- Priorité : LOD level décroissant, Y-range -4 à 20.
+- Délai adaptatif : `min(100 + ring*20, 2000) ms`.
+- Filtre bloom client : skip ~5-10% des sections (sous-optimal car reçu tard).
+
+#### Capability detection
+
+**Pas de handshake explicite.** Détection implicite :
+1. Client envoie `MSG_SYNC_REQUEST` au login → serveur assume capable.
+2. Serveur envoie `MSG_MAPPER_SYNC` → client confirme implicitement.
+
+Fallback : client sans Voxy = canal `.optional()` ignoré silencieusement,
+serveur continue pour les autres.
+
+**Client n'annonce PAS sa render distance** → serveur émet le même volume
+pour tous, indépendamment du hardware client.
+
+#### Storage côté serveur
+
+- Backend séparé du client (path différent), même config par défaut
+  (RocksDB + LZ4 + SectionSerializationStorage).
+- Pas de mode "relay sans stockage".
+- Pas de cache mémoire LRU pour sections hot.
+
+#### TODOs serveur
+
+`grep TODO/FIXME` dans `src/main/java/me/cortex/voxy/server/` et
+`src/main/java/me/cortex/voxy/common/network/` : **aucun résultat**.
+La zone est étonnamment clean — code authored avec intention, pas un brouillon.
+
+#### Synthèse santé
+
+**À laisser tranquille** :
+- Cycle de vie serveur, ingestion chunks, `SharedBandwidthLimit`,
+  `ChunkedLodSender`, persistence bloom filter.
+
+**Sous-optimisé (gain modéré)** :
+- **Pas de compression réseau** : sections décompressées du storage avant
+  envoi en clair. Gain potentiel **50-70% bande**, effort ~1 jour.
+- **Pas d'adaptation render distance client** : `maxStreamingRadius=32` fixe
+  pour tous. Gain **30-50% bande** sur clients bas-end, effort ~2 jours.
+- **Bloom filter envoyé tard** : skip 5-10% au lieu de 20-30% si demandé
+  avant le mapper sync. Effort ~4h.
+- **Rate update client ignoré** : enregistré mais jamais utilisé pour ajuster
+  l'envoi serveur. Effort ~4h.
+- **Pas de cache mémoire serveur** : I/O RocksDB dupliquée en multi-joueur.
+  Effort ~1 jour.
+
+**Cassé / manquant (vrais chantiers)** :
+- **Pas de versioning protocole général** : version "1" hardcodée, aucun chemin
+  pour faire évoluer un format de message. **BLOQUANT avant release publique**
+  (un client v0.3 ne peut pas parler à un serveur v0.4 si on touche un payload).
+  Effort ~4h.
+- **Pull mode déprécié mais pas retiré** : `MSG_REQUEST_SECTIONS` accepté puis
+  ignoré silencieusement. Code mort, confusion potentielle.
+- **Pas de heartbeat / reconnect** : crash serveur = états perdus.
+- **Limites batch arbitraires non documentées** : 2000 keys (request) vs 10000
+  (cache query), dépassements ignorés silencieusement.
+- **Pas de stats serveur structurées** (Prometheus/Grafana).
+- **Streaming ring inefficace pour joueur en mouvement rapide** : pas de
+  player velocity tracking / predictive ring.
+
+#### Tableau impact / effort
+
+| Item | Gain | Effort | Priorité |
+|------|------|--------|----------|
+| Versioning protocole | — (requis pour évolution) | 4h | **BLOQUANT** |
+| Compression réseau (LZ4 ou ZSTD) | 50-70% bande | 1 jour | **HAUTE** |
+| Adaptation RD client | 30-50% bande | 2 jours | HAUTE |
+| Cache mémoire sections (LRU) | 20-40% latence I/O | 1 jour | MOYENNE |
+| Early bloom filter query | 10-20% traffic init | 4h | MOYENNE |
+| Heartbeat / reconnect | robustesse | 1 jour | MOYENNE |
+
+**Verdict** : convient pour serveurs LAN / petits groupes (5-10 joueurs).
+Scalabilité multi-joueur sera bottleneck bande **avant** tout autre limite.
+
+---
+
+### 9.C Comparatif synthétique
+
+| Critère | Per-vertex lighting (9.A) | Optims serveur (9.B) |
+|---------|---------------------------|----------------------|
+| Effort total | 13-16h | 4h (versioning) → 2j (compression) → 4-5j (pack complet) |
+| Risque régression | Moyen-élevé (Iris) | Faible (zone propre, aucun TODO existant) |
+| Visibilité utilisateur | **Élevée** (eau + ombrage) | Modérée (la bande passante ne se voit pas) |
+| Débloque autres items | ✅ Item 14 d'office | ✅ Permet vrai scaling multi-joueur |
+| Réversibilité | Difficile (format change) | Facile (chaque optim indépendante) |
+| Type | Polish / qualité visuelle | Fondation / scalabilité |
+
+**Décision selon objectif** :
+- Release "showcase" visuelle → per-vertex lighting d'abord (enterre item 14).
+- Release publique multi-joueur → versioning protocole d'abord (4h, trivial,
+  bloquant), puis compression réseau, puis per-vertex après.
+- Hybride pragmatique : versioning (4h) → per-vertex (gros chantier visuel) →
+  optims réseau si on vise du multi-joueur sérieux.
