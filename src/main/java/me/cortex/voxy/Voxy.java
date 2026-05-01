@@ -3,6 +3,7 @@ package me.cortex.voxy;
 import me.cortex.voxy.client.VoxyClient;
 import me.cortex.voxy.client.VoxyCommands;
 import me.cortex.voxy.client.VoxyDebugScreenEntry;
+import me.cortex.voxy.client.debug.DebugSidecarListener;
 import me.cortex.voxy.common.network.VoxyNetworkHandler;
 import me.cortex.voxy.server.VoxyServer;
 import me.cortex.voxy.server.VoxyServerCommands;
@@ -42,6 +43,7 @@ public class Voxy {
             modEventBus.addListener(this::onClientSetup);
             NeoForge.EVENT_BUS.addListener(this::onRegisterClientCommands);
             NeoForge.EVENT_BUS.register(VoxyDebugScreenEntry.class);
+            NeoForge.EVENT_BUS.register(DebugSidecarListener.class);
         }
     }
 

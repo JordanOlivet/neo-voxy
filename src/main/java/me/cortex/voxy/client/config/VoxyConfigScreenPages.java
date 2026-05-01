@@ -153,6 +153,12 @@ public abstract class VoxyConfigScreenPages {
                         .setBinding((s, v) -> RenderStatistics.enabled = v, s -> RenderStatistics.enabled)
                         .setFlags(OptionFlag.REQUIRES_RENDERER_RELOAD)
                         .build())
+                .add(OptionImpl.createBuilder(boolean.class, storage)
+                        .setName(Component.translatable("voxy.config.general.debug_dump_on_screenshot"))
+                        .setTooltip(Component.translatable("voxy.config.general.debug_dump_on_screenshot.tooltip"))
+                        .setControl(TickBoxControl::new)
+                        .setBinding((s, v) -> s.debugDumpOnScreenshot = v, s -> s.debugDumpOnScreenshot)
+                        .build())
                 .build());
         return new OptionPage(Component.translatable("voxy.config.title"), ImmutableList.copyOf(groups));
     }
