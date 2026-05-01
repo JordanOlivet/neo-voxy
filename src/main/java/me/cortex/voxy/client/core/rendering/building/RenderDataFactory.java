@@ -18,6 +18,14 @@ import java.util.Arrays;
 
 public class RenderDataFactory {
     private static final boolean CHECK_NEIGHBOR_FACE_OCCLUSION = true;
+    // Note (2026-04-29): the original flag's truth-table is inverted relative to its
+    // name — when set to true, the cull-same shortcut ALWAYS fires on same-model
+    // neighbors (more aggressive culling), not less. Left as-is to preserve dev
+    // intent. The over-culling on partial same-model blocks (stairs/slabs in same
+    // orientation, comparators, etc.) is now mitigated by the asymmetric
+    // faceCanBeOccluded(self.meta, face) gate added at every cull-same site
+    // (2026-04-29). Stained-glass-on-chunk-border bug (item 11b) is unrelated to
+    // this flag and remains open pending runtime reproduction.
     private static final boolean DISABLE_CULL_SAME_OCCLUDES = false;//TODO: FIX TRANSLUCENTS (e.g. stained glass) breaking on chunk boarders with this set to false (it might be something else????)
 
     private static final boolean VERIFY_MESHING = VoxyCommon.isVerificationFlagOn("verifyMeshing");
@@ -360,7 +368,11 @@ public class RenderDataFactory {
     }
 
     private boolean shouldMeshNonOpaqueBlockFace(int face, long quad, long meta, long neighborQuad, long neighborMeta) {
-        if (((quad^neighborQuad)&(0xFFFFL<<26))==0 && (DISABLE_CULL_SAME_OCCLUDES || (ModelQueries.cullsSame(meta)||ModelQueries.faceOccludes(meta, face)))) return false;//This is a hack, if the neigbor and this are the same, dont mesh the face// TODO: FIXME
+        // Resolved (2026-04-29): added asymmetric faceCanBeOccluded(self.meta, face) gate.
+        // Prevents over-culling between two same-model partial blocks (stairs/slabs
+        // same-orientation) where the face is at offset >= 0.3 — the face cannot
+        // physically be occluded by anything, so the cull-same shortcut must not fire.
+        if (((quad^neighborQuad)&(0xFFFFL<<26))==0 && ModelQueries.faceCanBeOccluded(meta, face) && (DISABLE_CULL_SAME_OCCLUDES || (ModelQueries.cullsSame(meta)||ModelQueries.faceOccludes(meta, face)))) return false;//This is a hack, if the neigbor and this are the same, dont mesh the face// TODO: FIXME
         if (!ModelQueries.faceExists(meta, face)) return false;//Dont mesh if no face
         //if (ModelQueries.faceCanBeOccluded(meta, face)) //TODO: maybe enable this
             int selfId = (int)((quad >> 26) & 0xFFFF);
@@ -423,13 +435,18 @@ public class RenderDataFactory {
 
                         //Check if next culls this face
                         if (CHECK_NEIGHBOR_FACE_OCCLUSION) {
+                            long selfMeta = this.sectionData[iA + 1];
                             long neighbor = this.sectionData[iB + 1];
+                            int selfFace = (axis << 1) | facingForward;
                             boolean culls = false;
-                            culls |= ((selfModel^nextModel)&(0xFFFFL<<26))==0&&ModelQueries.cullsSame(neighbor);
+                            // Resolved (2026-04-29): asymmetric faceCanBeOccluded(self) gate added —
+                            // cullsSame is a global per-block flag, but only faces actually flush
+                            // against the cube boundary should be culled by it.
+                            culls |= ((selfModel^nextModel)&(0xFFFFL<<26))==0 && ModelQueries.faceCanBeOccluded(selfMeta, selfFace) && ModelQueries.cullsSame(neighbor);
                             // Wired (2026-04-27): mask-aware face cover via isFaceCoveredByNeighbor.
                             int selfId = (int)((selfModel >> 26) & 0xFFFF);
                             int neighborId = (int)((nextModel >> 26) & 0xFFFF);
-                            culls |= this.isFaceCoveredByNeighbor(selfId, (axis << 1) | facingForward, neighborId, neighbor);
+                            culls |= this.isFaceCoveredByNeighbor(selfId, selfFace, neighborId, neighbor);
                             if (culls) {
                                 this.blockMesher.skip(1);
                                 continue;
@@ -495,11 +512,14 @@ public class RenderDataFactory {
                             //This very funnily causes issues when not combined with meshing non full opaque geometry
                             //TODO:FIXME, when non opaque geometry is added
                             if (CHECK_NEIGHBOR_FACE_OCCLUSION) {
+                                long selfMeta = this.sectionData[idx * 2 + 1];
+                                int selfFace = (axis << 1) | side;
                                 boolean culls = false;
-                                culls |= nib==((A>>26)&0xFFFF)&&ModelQueries.cullsSame(meta);
+                                // Resolved (2026-04-29): asymmetric faceCanBeOccluded(self) gate.
+                                culls |= nib==((A>>26)&0xFFFF) && ModelQueries.faceCanBeOccluded(selfMeta, selfFace) && ModelQueries.cullsSame(meta);
                                 // Wired (2026-04-27): mask-aware face cover via isFaceCoveredByNeighbor.
                                 int selfId = (int)((A >> 26) & 0xFFFF);
-                                culls |= this.isFaceCoveredByNeighbor(selfId, (axis << 1) | side, neighborModelId, meta);
+                                culls |= this.isFaceCoveredByNeighbor(selfId, selfFace, neighborModelId, meta);
                                 if (culls) {
                                     this.blockMesher.skip(1);
                                     continue;
@@ -670,7 +690,8 @@ public class RenderDataFactory {
                             if (ModelQueries.containsFluid(meta)) {
                                 modelId = this.modelMan.getFluidClientStateId(modelId);
                             }
-                            if (ModelQueries.cullsSame(B)) {
+                            // Resolved (2026-04-29): asymmetric faceCanBeOccluded(self) gate.
+                            if (ModelQueries.faceCanBeOccluded(B, (axis << 1) | side) && ModelQueries.cullsSame(B)) {
                                 if (modelId == ((A>>26)&0xFFFF)) {
                                     this.blockMesher.skip(1);
                                     continue;
@@ -1323,7 +1344,8 @@ public class RenderDataFactory {
                             modelId = this.modelMan.getFluidClientStateId(modelId);
                         }
 
-                        if (ModelQueries.cullsSame(Am)) {
+                        // Resolved (2026-04-29): asymmetric faceCanBeOccluded(self) gate. -x face = 0.
+                        if (ModelQueries.faceCanBeOccluded(Am, 0) && ModelQueries.cullsSame(Am)) {
                             if (modelId == ((A>>26)&0xFFFF)) {
                                 oki = false;
                             }
@@ -1386,7 +1408,8 @@ public class RenderDataFactory {
                             modelId = this.modelMan.getFluidClientStateId(modelId);
                         }
 
-                        if (ModelQueries.cullsSame(Am)) {
+                        // Resolved (2026-04-29): asymmetric faceCanBeOccluded(self) gate. +x face = 1.
+                        if (ModelQueries.faceCanBeOccluded(Am, 1) && ModelQueries.cullsSame(Am)) {
                             if (modelId == ((A>>26)&0xFFFF)) {
                                 oki = false;
                             }

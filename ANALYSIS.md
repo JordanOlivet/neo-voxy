@@ -273,11 +273,22 @@ Deux bugs latents identifiés lors de l'analyse du phantom occlusion :
       où le voisin a un mask full mais que `faceOccludes` était stricte (rare
       mais existe). Les régressions visuelles sur self-transparent-vs-mur
       sont évitées par le OR avec le legacy.
-    - **Reste ouvert (suivi possible)** : passer `cullsSame` en gate
-      asymétrique avec `faceCanBeOccluded` (bit 0b100 déjà setté en
-      `ModelFactory.java` L.615) pour fix family (b) plus profondément, et
-      réessayer de débloquer `DISABLE_CULL_SAME_OCCLUDES`. Pas de blocker
-      restant côté infrastructure.
+    - **FAIT 2026-04-29 (suivi cullsSame asymétrique)** : ajout du gate
+      `ModelQueries.faceCanBeOccluded(selfMeta, selfFace)` aux 6 callsites
+      `cullsSame` de `RenderDataFactory` :
+      `shouldMeshNonOpaqueBlockFace` (L.~370), opaque inner YZ (L.~432),
+      opaque outer YZ (L.~507), fluid YZ outer (L.~681),
+      X fluid outer -x (L.~1351), X fluid outer +x (L.~1415). Aux deux
+      premiers sites opaque-YZ, `selfMeta` est désormais chargé depuis
+      `sectionData[idx*2 + 1]`. Effet : un bloc partiel (face à offset ≥ 0.3)
+      ne se fait plus culler par le shortcut cull-same même si le voisin a
+      le même model id — seul le mask wiring (étape 4) peut le culler à ce
+      stade, et uniquement si le voisin couvre vraiment la face. Le flag
+      `DISABLE_CULL_SAME_OCCLUDES` est laissé à `false` avec une note
+      détaillée (L.21-29) expliquant que sa sémantique est inversée par
+      rapport à son nom (flip = cull plus agressif, pas l'inverse) : le bug
+      stained-glass-aux-bordures (item 11b) n'est pas lié à ce flag et
+      reste ouvert pending repro runtime.
 
     **(b) Self-occlusion / culling fin** (`RenderDataFactory:774,789,954,1021,1043,1151`) [VERIFIE 2026-04-25]
     - Audit des 6 sites : tous suivent un pattern asymétrique (cull si neighbor
