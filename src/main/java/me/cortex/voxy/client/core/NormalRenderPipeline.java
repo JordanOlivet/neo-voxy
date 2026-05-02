@@ -126,6 +126,39 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
     }
 
     @Override
+    public void blitOverTranslucent(Viewport<?> viewport, int sourceFrameBuffer) {
+        if (this.colourSSAOTex == null) return;
+
+        this.finalBlit.bind();
+        glBindTextureUnit(3, this.colourSSAOTex.id);
+
+        glEnable(GL_BLEND);
+        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+
+        glDisable(GL_STENCIL_TEST);
+        glBindFramebuffer(GL_FRAMEBUFFER, sourceFrameBuffer);
+        this.finalBlit.bind();
+        glBindTextureUnit(0, this.fb.getDepthTex().id);
+
+        try (var stack = MemoryStack.stackPush()) {
+            long ptr = stack.nmalloc(64);
+            new Matrix4f(viewport.MVP).invert().getToAddress(ptr);
+            nglUniformMatrix4fv(1, 1, false, ptr);
+            new Matrix4f(viewport.vanillaProjection).mul(viewport.modelView).getToAddress(ptr);
+            nglUniformMatrix4fv(2, 1, false, ptr);
+        }
+
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_ALWAYS);
+        this.finalBlit.blit();
+        glDepthFunc(GL_LEQUAL);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_STENCIL_TEST);
+
+        glDisable(GL_BLEND);
+    }
+
+    @Override
     public void free() {
         this.finalBlit.delete();
         this.ssaoCompute.free();

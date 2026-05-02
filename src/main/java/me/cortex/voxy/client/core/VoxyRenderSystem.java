@@ -74,6 +74,9 @@ public class VoxyRenderSystem {
     // LOD streaming reception service
     private LodReceptionService lodReceptionService;
 
+    private Viewport<?> deferredViewport;
+    private int deferredSourceFB;
+
     private static AbstractSectionRenderer.Factory<?, ? extends IGeometryData> getRenderBackendFactory() {
         // TODO: need todo a thing where selects optimal section render based on if
         // supports the pipeline and geometry data type
@@ -274,6 +277,9 @@ public class VoxyRenderSystem {
         // The entire rendering pipeline (excluding the chunkbound thing)
         this.pipeline.runPipeline(viewport, boundFB, dims[2], dims[3]);
 
+        this.deferredViewport = viewport;
+        this.deferredSourceFB = boundFB;
+
         TimingStatistics.main.stop();
         TimingStatistics.postDynamic.start();
 
@@ -367,6 +373,17 @@ public class VoxyRenderSystem {
          * this.postProcessing.renderPost(viewport, matrices.projection(), boundFB);
          * TimingStatistics.F.stop();
          */
+    }
+
+    public void blitOverTranslucent() {
+        if (this.deferredViewport == null) return;
+        var viewport = this.deferredViewport;
+        int sourceFB = this.deferredSourceFB;
+        this.deferredViewport = null;
+
+        int oldFB = GL11.glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
+        this.pipeline.blitOverTranslucent(viewport, sourceFB);
+        glBindFramebuffer(GlConst.GL_FRAMEBUFFER, oldFB);
     }
 
     private void autoBalanceSubDivSize() {

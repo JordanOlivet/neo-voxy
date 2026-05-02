@@ -55,6 +55,11 @@ public abstract class MixinDefaultChunkRenderer extends ShaderChunkRenderer {
                         camera.y, camera.z);
                 renderer.renderOpaque(viewport);
             }
+        } else if (renderPass == DefaultTerrainRenderPasses.TRANSLUCENT) {
+            var renderer = ((IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer).getVoxyRenderSystem();
+            if (renderer != null) {
+                renderer.blitOverTranslucent();
+            }
         }
     }
 }
