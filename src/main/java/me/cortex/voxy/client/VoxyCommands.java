@@ -75,7 +75,42 @@ public class VoxyCommands {
                         .executes(ctx -> dumpBounds(ctx, -1))
                         .then(Commands.argument("radius", IntegerArgumentType.integer(0, 64))
                                 .executes(ctx -> dumpBounds(ctx, IntegerArgumentType.getInteger(ctx, "radius")))))
+                .then(Commands.literal("dumpAtlas")
+                        .executes(VoxyCommands::dumpAtlas))
                 .then(imports);
+    }
+
+    // Dumps the Voxy model atlas (mip 0) to <gameDir>/voxy-atlas-<timestamp>.png.
+    // Used to verify alpha preservation through the GPU bake for translucent
+    // blocks (ice, glass) — open the PNG and inspect ice tile's alpha channel.
+    private static int dumpAtlas(CommandContext<CommandSourceStack> ctx) {
+        var mc = Minecraft.getInstance();
+        var wr = mc.levelRenderer;
+        if (!(wr instanceof IGetVoxyRenderSystem vrs)) {
+            ctx.getSource().sendFailure(Component.literal("Voxy render system not available"));
+            return 1;
+        }
+        var renderSystem = vrs.getVoxyRenderSystem();
+        if (renderSystem == null) {
+            ctx.getSource().sendFailure(Component.literal("Voxy render system not initialized"));
+            return 1;
+        }
+        String stamp = new java.text.SimpleDateFormat("yyyy-MM-dd_HH.mm.ss").format(new java.util.Date());
+        File out = new File(mc.gameDirectory, "voxy-atlas-" + stamp + ".png");
+        try {
+            boolean ok = renderSystem.dumpModelAtlas(out);
+            if (ok) {
+                ctx.getSource().sendSystemMessage(Component.literal("Atlas dumped: " + out.getAbsolutePath()));
+                return 0;
+            } else {
+                ctx.getSource().sendFailure(Component.literal("Atlas dump failed (see log)"));
+                return 1;
+            }
+        } catch (Throwable t) {
+            Logger.error("dumpAtlas failed", t);
+            ctx.getSource().sendFailure(Component.literal("Atlas dump threw: " + t.getMessage()));
+            return 1;
+        }
     }
 
     private static int dumpBounds(CommandContext<CommandSourceStack> ctx, int radiusArg) {
