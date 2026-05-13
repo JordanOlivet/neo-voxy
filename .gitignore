@@ -8,3 +8,5 @@ dist
 logs
 /libs
 build.bat
+server_test
+.vscode

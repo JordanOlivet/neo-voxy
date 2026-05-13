@@ -17,6 +17,7 @@ import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.level.ChunkEvent;
 import net.neoforged.neoforge.event.level.LevelEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
+import net.neoforged.neoforge.event.server.ServerAboutToStartEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 
@@ -44,19 +45,45 @@ public class VoxyServer {
     // Is server-side LOD generation enabled
     private static boolean isInitialized = false;
 
+    // Loaded at ServerStartedEvent, accessible by LodStreamingService et al.
+    private static volatile VoxyServerConfig serverConfig = new VoxyServerConfig();
+
+    public static VoxyServerConfig getServerConfig() {
+        return serverConfig;
+    }
+
     /**
      * Initialize server-side LOD streaming.
      * Called when the server starts.
      */
+    /**
+     * Initialize Voxy <i>before</i> the server starts loading the world.
+     * <p>
+     * This is the first server lifecycle event NeoForge fires. The integrated /
+     * dedicated server creates the {@link VoxyCommon} instance here, flips the
+     * {@code isInitialized} flag and loads the server config so the subsequent
+     * {@link ChunkEvent.Load} events that fire while the spawn chunks load are
+     * actually ingested. Doing the init at {@link ServerStartedEvent} (as it used
+     * to be) loses the spawn chunks because they finish loading before that event.
+     */
     @SubscribeEvent
-    public static void onServerStarted(ServerStartedEvent event) {
+    public static void onServerAboutToStart(ServerAboutToStartEvent event) {
         currentServer = event.getServer();
 
-        // Register server-side message handler
-        VoxyNetworkHandler.setServerMessageHandler(VoxyServer::handleClientMessage);
+        try {
+            serverConfig = VoxyServerConfig.load(currentServer.getServerDirectory());
+            Logger.info("Loaded voxy-server-config.json (maxStreamingRadiusChunks="
+                    + serverConfig.maxStreamingRadiusChunks + " [=" +
+                    serverConfig.getMaxStreamingRadiusSections() + " voxy sections], serializeThreads="
+                    + serverConfig.effectiveSerializeThreads() + ")");
+        } catch (Exception e) {
+            Logger.error("Failed to load voxy-server-config.json, using defaults", e);
+            serverConfig = new VoxyServerConfig();
+        }
 
-        // Create VoxyCommon instance for server-side LOD storage (dedicated server
-        // only)
+        // Dedicated server: provision the server-side LOD storage now so the spawn
+        // chunks generated during world load can already be ingested. Single-player
+        // keeps using the client's instance (the integrated server piggybacks on it).
         if (VoxyCommon.IS_DEDICATED_SERVER && VoxyCommon.getInstance() == null) {
             Logger.info("Creating VoxyServerInstance for server-side LOD storage");
             VoxyCommon.setInstanceFactory(VoxyServerInstance::new);
@@ -64,7 +91,16 @@ public class VoxyServer {
         }
 
         isInitialized = true;
-        Logger.info("VoxyServer initialized - LOD streaming and generation enabled");
+        Logger.info("VoxyServer pre-init complete - spawn chunks will be ingested");
+    }
+
+    @SubscribeEvent
+    public static void onServerStarted(ServerStartedEvent event) {
+        // Network handler can only safely register once payload registration has been
+        // completed by NeoForge (which happens before ServerStartedEvent). Keep it
+        // here so the registration order is deterministic.
+        VoxyNetworkHandler.setServerMessageHandler(VoxyServer::handleClientMessage);
+        Logger.info("VoxyServer ready - LOD streaming handlers registered");
     }
 
     /**
@@ -72,37 +108,65 @@ public class VoxyServer {
      */
     @SubscribeEvent
     public static void onChunkLoad(ChunkEvent.Load event) {
-        if (!isInitialized)
+        if (!isInitialized) {
+            if (serverConfig.logIngestSkips) {
+                Logger.info("[VoxyIngest] skip: !isInitialized");
+            }
             return;
+        }
 
         LevelAccessor level = event.getLevel();
-        if (!(level instanceof ServerLevel serverLevel))
+        if (!(level instanceof ServerLevel serverLevel)) {
             return;
+        }
 
-        // Only process full LevelChunks, not proto-chunks
-        if (!(event.getChunk() instanceof LevelChunk levelChunk))
+        // Only process full LevelChunks, not proto-chunks. A chunk loaded mid
+        // generation (PROTO status) is not safely readable here; vanilla will fire
+        // ChunkEvent.Load again once it is promoted to FULL.
+        if (!(event.getChunk() instanceof LevelChunk levelChunk)) {
+            if (serverConfig.logIngestSkips) {
+                Logger.info("[VoxyIngest] skip (proto-chunk) at " + event.getChunk().getPos() +
+                        " status=" + event.getChunk().getPersistedStatus());
+            }
             return;
+        }
 
-        // Get world identifier for this server level
         WorldIdentifier worldId = WorldIdentifier.of(serverLevel);
-        if (worldId == null)
+        if (worldId == null) {
+            if (serverConfig.logIngestSkips) {
+                Logger.info("[VoxyIngest] skip: WorldIdentifier null for " + serverLevel.dimension().location());
+            }
             return;
+        }
 
-        // Check if Voxy instance is available
         var instance = VoxyCommon.getInstance();
-        if (instance == null)
+        if (instance == null) {
+            if (serverConfig.logIngestSkips) {
+                Logger.info("[VoxyIngest] skip: VoxyCommon instance null at " + levelChunk.getPos());
+            }
             return;
-        if (!instance.isIngestEnabled(worldId))
+        }
+        if (!instance.isIngestEnabled(worldId)) {
+            if (serverConfig.logIngestSkips) {
+                Logger.info("[VoxyIngest] skip: ingest disabled for " + worldId);
+            }
             return;
+        }
 
-        // Get or create the world engine for this level
         var engine = instance.getOrCreate(worldId);
-        if (engine == null)
+        if (engine == null) {
+            if (serverConfig.logIngestSkips) {
+                Logger.info("[VoxyIngest] skip: engine null for " + worldId);
+            }
             return;
+        }
 
-        // Ingest the chunk into the LOD system
         try {
-            instance.getIngestService().enqueueIngest(engine, levelChunk);
+            boolean queued = instance.getIngestService().enqueueIngest(engine, levelChunk);
+            if (!queued && serverConfig.logIngestSkips) {
+                Logger.info("[VoxyIngest] enqueueIngest returned false at " + levelChunk.getPos() +
+                        " (no lighting yet or queue rejected) — chunk may never get a LOD until manual regen");
+            }
         } catch (Exception e) {
             Logger.error("Failed to ingest server chunk at " + levelChunk.getPos(), e);
         }
@@ -157,7 +221,7 @@ public class VoxyServer {
         LodStreamingService service = streamingServices.computeIfAbsent(level,
                 l -> {
                     Logger.info("Creating LodStreamingService for " + level.dimension().location());
-                    return new LodStreamingService(engine);
+                    return new LodStreamingService(engine, level);
                 });
 
         // Actually start the sync for this player
@@ -213,7 +277,7 @@ public class VoxyServer {
         LodStreamingService service = streamingServices.computeIfAbsent(level,
                 l -> {
                     Logger.info("Creating LodStreamingService for " + level.dimension().location());
-                    return new LodStreamingService(engine);
+                    return new LodStreamingService(engine, level);
                 });
 
         // Forward section request to streaming service

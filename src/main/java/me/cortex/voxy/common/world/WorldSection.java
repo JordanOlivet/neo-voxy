@@ -22,6 +22,7 @@ public final class WorldSection {
     private static final VarHandle IN_SAVE_QUEUE_HANDLE;
     private static final VarHandle IS_DIRTY_HANDLE;
     private static final VarHandle INGESTED_OCTANT_HANDLE;
+    private static final VarHandle VERSION_HANDLE;
 
     static {
         try {
@@ -31,6 +32,7 @@ public final class WorldSection {
             IN_SAVE_QUEUE_HANDLE = MethodHandles.lookup().findVarHandle(WorldSection.class, "inSaveQueue", boolean.class);
             IS_DIRTY_HANDLE = MethodHandles.lookup().findVarHandle(WorldSection.class, "isDirty", boolean.class);
             INGESTED_OCTANT_HANDLE = MethodHandles.lookup().findVarHandle(WorldSection.class, "ingestedOctantMask", byte.class);
+            VERSION_HANDLE = MethodHandles.lookup().findVarHandle(WorldSection.class, "version", long.class);
         } catch (NoSuchFieldException | IllegalAccessException e) {
             throw new RuntimeException(e);
         }
@@ -65,6 +67,11 @@ public final class WorldSection {
     final ActiveSectionTracker tracker;
     volatile boolean inSaveQueue;
     volatile boolean isDirty;
+    // Monotonic counter bumped on every markDirty. Streaming uses this to detect that
+    // a section has changed since the last time it was sent to a given client, so the
+    // server can resend an updated copy without tracking per-(section,player) state.
+    @SuppressWarnings("unused")
+    volatile long version = 0;
 
     //When the first bit is set it means its loaded
     @SuppressWarnings("all")
@@ -319,6 +326,14 @@ public final class WorldSection {
 
     public void markDirty() {
         IS_DIRTY_HANDLE.getAndSet(this, true);
+    }
+
+    public long getVersion() {
+        return (long) VERSION_HANDLE.getVolatile(this);
+    }
+
+    public long bumpVersion() {
+        return ((long) VERSION_HANDLE.getAndAdd(this, 1L)) + 1L;
     }
 
     public boolean setNotDirty() {

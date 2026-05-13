@@ -5,6 +5,9 @@ import me.cortex.voxy.common.network.*;
 import me.cortex.voxy.common.world.SectionSerializer;
 import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.common.world.WorldSection;
+import me.cortex.voxy.server.VoxyServer;
+import me.cortex.voxy.server.VoxyServerConfig;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 
 import java.io.IOException;
@@ -13,121 +16,141 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Server-side service that manages streaming LOD sections to connected players.
- * <p>
- * Uses a unified server-driven architecture:
+ * Server-side service that streams LOD sections to connected players.
+ *
+ * <p>Architecture:
  * <ul>
- * <li>Server iterates sections it has (ring-based expansion from player)</li>
- * <li>Uses client bloom filter hints to skip already-received sections</li>
- * <li>Prioritizes by distance and LOD level (lower LOD = higher priority)</li>
+ * <li><b>Follow-player:</b> per-player fixed-rate task re-reads the player's
+ * section coords every tick. Movement resets the ring origin so newly entered
+ * areas stream immediately.</li>
+ * <li><b>Dirty-version resend:</b> {@link WorldSection#getVersion()} is compared
+ * to the last value sent to that player. If the section has changed since (e.g.
+ * Chunky generated new chunks, a block was placed) it is re-serialized and
+ * re-sent.</li>
+ * <li><b>Dirty-driven push:</b> hooks {@link WorldEngine#setDirtyCallback} so
+ * sections recently changed are drained <i>first</i> on each player tick when
+ * they fall within the player's radius. Solves the Chunky-pregen-doesn't-stream
+ * problem.</li>
+ * <li><b>Shared serialized cache:</b> {@code SectionSerializer.serialize} runs
+ * once per (section, version) and the byte payload is shared across all players
+ * receiving that section.</li>
+ * <li><b>Worker pool:</b> serialization runs on a small pool so a single thread
+ * is not the bottleneck at high player counts.</li>
+ * <li><b>Bandwidth:</b> delegated to {@link ChunkedLodSender} / shared
+ * {@link SharedBandwidthLimit} (unchanged).</li>
  * </ul>
- * Uses {@link ChunkedLodSender} for bandwidth-limited transfer.
  */
 public class LodStreamingService implements AutoCloseable {
 
     private final WorldEngine worldEngine;
+    private final ServerLevel level;
+    private final VoxyServerConfig config;
     private final SharedBandwidthLimit sharedBandwidthLimit;
     private final ConcurrentHashMap<UUID, PlayerStreamingState> playerStates = new ConcurrentHashMap<>();
 
     private final ScheduledExecutorService scheduler;
+    private final ExecutorService serializeExecutor;
     private final AtomicBoolean isActive = new AtomicBoolean(true);
 
-    // Config
-    private final int perPlayerLimitKBps;
-    private final int maxStreamingRadius;
-    private final Path cacheDir;
+    // Voxy section units (32 blocks each); derived from ServerLevel build height.
+    private final int minSectionY;
+    private final int maxSectionYExclusive;
 
-    /**
-     * Create streaming service with default settings.
-     */
-    public LodStreamingService(WorldEngine worldEngine) {
-        this(worldEngine, new SharedBandwidthLimit(),
-                SharedBandwidthLimit.DEFAULT_PLAYER_LIMIT_KBPS, 32);
+    // Bounded queue of sections recently bumped via WorldEngine.markDirty. The
+    // per-player tick drains this first, filtering by player proximity.
+    private final ArrayDeque<Long> recentlyDirtyKeys = new ArrayDeque<>();
+    private final Object dirtyLock = new Object();
+
+    // Shared serialized-section cache (LRU): one serialize per (key, version).
+    private final LinkedHashMap<Long, CachedSection> serializedCache;
+    private final Object cacheLock = new Object();
+
+    private WorldEngine.ISectionChangeCallback prevDirtyCallback;
+
+    public LodStreamingService(WorldEngine worldEngine, ServerLevel level) {
+        this(worldEngine, level, new SharedBandwidthLimit());
     }
 
-    /**
-     * Create streaming service with custom settings.
-     */
-    public LodStreamingService(WorldEngine worldEngine, SharedBandwidthLimit sharedBandwidthLimit,
-            int perPlayerLimitKBps, int maxStreamingRadius) {
+    public LodStreamingService(WorldEngine worldEngine, ServerLevel level, SharedBandwidthLimit sharedBandwidthLimit) {
         this.worldEngine = worldEngine;
+        this.level = level;
         this.sharedBandwidthLimit = sharedBandwidthLimit;
-        this.perPlayerLimitKBps = perPlayerLimitKBps;
-        this.maxStreamingRadius = maxStreamingRadius;
-        this.cacheDir = null; // Use default path
+        this.config = VoxyServer.getServerConfig();
 
-        // Keep the world engine alive while streaming service exists
+        // Convert level build height (blocks) to voxy section coords (32 blocks).
+        this.minSectionY = Math.floorDiv(level.getMinBuildHeight(), 32);
+        this.maxSectionYExclusive = Math.floorDiv(level.getMaxBuildHeight() - 1, 32) + 1;
+
         this.worldEngine.acquireRef();
 
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "VoxyLodStreaming");
+            Thread t = new Thread(r, "VoxyLodStreaming-" + level.dimension().location().getPath());
             t.setDaemon(true);
             return t;
         });
 
-        Logger.info("LodStreamingService initialized with server-driven streaming");
-    }
+        int workers = Math.max(1, config.effectiveSerializeThreads());
+        AtomicInteger threadIdx = new AtomicInteger();
+        this.serializeExecutor = Executors.newFixedThreadPool(workers, r -> {
+            Thread t = new Thread(r, "VoxySerialize-" + threadIdx.getAndIncrement());
+            t.setDaemon(true);
+            return t;
+        });
 
-    /**
-     * Get the cache directory for bloom filters.
-     */
-    private Path getCacheDir() {
-        if (cacheDir == null) {
-            return Path.of("voxy_cache", "player_bloom_filters");
-        }
-        return cacheDir.resolve("player_bloom_filters");
-    }
-
-    /**
-     * Save a player's bloom filter to disk.
-     */
-    private void savePlayerCache(UUID playerId, BloomFilter filter) {
-        if (filter == null)
-            return;
-        try {
-            Path cacheDir = getCacheDir();
-            Files.createDirectories(cacheDir);
-            Path cacheFile = cacheDir.resolve(playerId.toString() + ".bloom");
-            Files.write(cacheFile, filter.toBytes());
-            Logger.info("Saved bloom filter for " + playerId + " (" + filter.getSerializedSize() + " bytes)");
-        } catch (IOException e) {
-            Logger.error("Failed to save bloom filter for " + playerId + ": " + e.getMessage());
-        }
-    }
-
-    /**
-     * Load a player's bloom filter from disk.
-     * Returns null if no filter exists or if the saved filter is too small to be
-     * useful.
-     */
-    private BloomFilter loadPlayerCache(UUID playerId) {
-        try {
-            Path cacheFile = getCacheDir().resolve(playerId.toString() + ".bloom");
-            if (Files.exists(cacheFile)) {
-                byte[] data = Files.readAllBytes(cacheFile);
-                // Reject filters that are too small (high false positive rate)
-                // 10000 expected elements * 10 bits = 100000 bits = 12500 bytes minimum
-                if (data.length < 1000) {
-                    Logger.info("Saved bloom filter for " + playerId + " too small (" + data.length +
-                            " bytes), discarding");
-                    Files.delete(cacheFile); // Remove the bad filter
-                    return null;
-                }
-                BloomFilter filter = BloomFilter.fromBytes(data);
-                Logger.info("Loaded saved bloom filter for " + playerId + " (" + data.length + " bytes)");
-                return filter;
+        final int cacheCap = Math.max(64, config.serializedCacheEntries);
+        this.serializedCache = new LinkedHashMap<>(cacheCap, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<Long, CachedSection> eldest) {
+                return size() > cacheCap;
             }
-        } catch (IOException e) {
-            Logger.error("Failed to load bloom filter for " + playerId + ": " + e.getMessage());
-        }
-        return null;
+        };
+
+        installDirtyCallback();
+
+        Logger.info("LodStreamingService initialized [" + level.dimension().location() +
+                "] workers=" + workers + " radius=" + config.maxStreamingRadiusChunks +
+                "ch (=" + config.getMaxStreamingRadiusSections() + "vs)" +
+                " ySections=[" + minSectionY + ".." + maxSectionYExclusive + ")");
     }
 
-    /**
-     * Handle rate update from client.
-     */
+    private void installDirtyCallback() {
+        this.prevDirtyCallback = null; // No-op chain target; server has no render-side listener.
+        worldEngine.setDirtyCallback((section, flags, neighborMsk) -> {
+            try {
+                onSectionDirty(section.key);
+            } catch (Throwable t) {
+                Logger.error("Dirty callback failure", t);
+            }
+            if (prevDirtyCallback != null) {
+                prevDirtyCallback.accept(section, flags, neighborMsk);
+            }
+        });
+    }
+
+    private void onSectionDirty(long key) {
+        synchronized (dirtyLock) {
+            int cap = Math.max(256, config.dirtyQueueMaxEntries);
+            while (recentlyDirtyKeys.size() >= cap) {
+                recentlyDirtyKeys.pollFirst();
+            }
+            recentlyDirtyKeys.addLast(key);
+        }
+    }
+
+    private List<Long> snapshotDirty() {
+        synchronized (dirtyLock) {
+            if (recentlyDirtyKeys.isEmpty()) {
+                return Collections.emptyList();
+            }
+            List<Long> out = new ArrayList<>(recentlyDirtyKeys);
+            recentlyDirtyKeys.clear();
+            return out;
+        }
+    }
+
     public void handleRateUpdate(ServerPlayer player, VoxyPacketPayload payload) {
         int desiredRate = payload.parseRate();
         PlayerStreamingState state = playerStates.get(player.getUUID());
@@ -136,58 +159,53 @@ public class LodStreamingService implements AutoCloseable {
         }
     }
 
-    /**
-     * Handle section request from client (deprecated - pull mode removed).
-     * <p>
-     * This method is kept for backward compatibility with older clients but no
-     * longer
-     * processes requests. The unified architecture uses server-driven streaming
-     * only.
-     * 
-     * @deprecated Pull mode has been removed. Server now drives all section
-     *             streaming.
-     */
     @Deprecated
     public void handleSectionRequest(ServerPlayer player, VoxyPacketPayload payload) {
-        // Pull mode deprecated - server now drives all streaming
-        // Log once per player to help diagnose old clients
         Logger.info("Ignoring pull request from " + player.getName().getString() +
-                " (pull mode deprecated, using server-driven streaming)");
+                " (pull mode deprecated, server-driven streaming only)");
     }
 
-    /**
-     * Start LOD sync for a player. Called by VoxyServer when it receives a sync
-     * request.
-     */
     public void startSyncForPlayer(ServerPlayer player) {
         Logger.info("Received sync request from " + player.getName().getString());
 
         PlayerStreamingState state = playerStates.computeIfAbsent(
                 player.getUUID(),
-                uuid -> new PlayerStreamingState(player, sharedBandwidthLimit, perPlayerLimitKBps));
+                uuid -> new PlayerStreamingState(player, sharedBandwidthLimit, config.perPlayerLimitKBps));
 
-        // Load saved bloom filter from previous session
+        // Refresh in case the player reconnected and the ServerPlayer instance was
+        // replaced (state.player would otherwise still point to a disconnected handle
+        // whose .connection is null).
+        state.player = player;
+        // Force a fresh ring expansion from the player's current position so a teleport
+        // or rejoin after generating chunks elsewhere doesn't have to wait for player
+        // movement to re-trigger the scan.
+        state.currentRing = 0;
+        state.consecutiveEmptyRings = 0;
+        state.inMaintenance = false;
+        state.lastPlayerSectionX = Integer.MIN_VALUE;
+        state.lastPlayerSectionZ = Integer.MIN_VALUE;
+
         BloomFilter savedFilter = loadPlayerCache(player.getUUID());
         if (savedFilter != null) {
             state.clientCacheFilter = savedFilter;
             Logger.info("Using saved bloom filter for " + player.getName().getString());
         }
 
-        // Send mapper data
         sendMapperSync(player);
-
-        // Request bloom filter from client to skip sections they already have
         VoxyNetworkHandler.sendToPlayer(player, VoxyPacketPayload.cacheQuery(new long[0]));
 
-        // Start server-driven streaming (ring-based expansion from player position)
-        scheduler.submit(() -> startStreaming(state));
+        long periodMs = Math.max(20L, (long) (1000.0 / Math.max(1.0, config.activeTickHz)));
+        if (state.scheduledHandle != null) {
+            state.scheduledHandle.cancel(false);
+        }
+        state.scheduledHandle = scheduler.scheduleAtFixedRate(
+                () -> tickPlayer(state),
+                0L, periodMs, TimeUnit.MILLISECONDS);
 
-        Logger.info("Server-driven streaming enabled for " + player.getName().getString());
+        Logger.info("Server-driven streaming enabled for " + player.getName().getString() +
+                " (tick=" + periodMs + "ms, radius=" + effectiveRadius(state) + ")");
     }
 
-    /**
-     * Send the mapper sync packet to a player.
-     */
     private void sendMapperSync(ServerPlayer player) {
         byte[] mapperData = IdRemapper.serializeMapper(worldEngine.getMapper());
         VoxyNetworkHandler.sendToPlayer(player, VoxyPacketPayload.mapperSync(mapperData));
@@ -196,207 +214,329 @@ public class LodStreamingService implements AutoCloseable {
     }
 
     /**
-     * Server-driven streaming - continuously streams sections from player position.
-     * Uses bloom filter to skip sections the client already has.
-     * Continues until the edge of available LODs, then periodically rescans for new
-     * data.
+     * Per-player tick. Order of operations:
+     * <ol>
+     * <li>Sanity / liveness checks.</li>
+     * <li>Detect player movement (reset ring origin).</li>
+     * <li>Drain recently-dirty sections within radius (Chunky-friendly push).</li>
+     * <li>Expand the current ring around the player.</li>
+     * </ol>
      */
-    private void startStreaming(PlayerStreamingState state) {
-        if (!isActive.get() || !state.player.isAlive()) {
+    private void tickPlayer(PlayerStreamingState state) {
+        if (!isActive.get()) {
             return;
         }
-
-        // Keep the world engine marked as active during streaming
-        worldEngine.markActive();
-
-        // Ensure bloom filter exists for tracking sent sections
-        if (state.clientCacheFilter == null) {
-            state.clientCacheFilter = BloomFilter.forExpectedElements(10000);
+        ServerPlayer player = state.player;
+        if (!player.isAlive() || player.connection == null) {
+            cancel(state);
+            return;
         }
+        try {
+            worldEngine.markActive();
 
-        int sectionsQueued = 0;
-        int sectionsFound = 0; // Tracks server sections found (even if already sent/in bloom)
-        int currentRing = state.currentRing;
+            if (state.clientCacheFilter == null) {
+                state.clientCacheFilter = BloomFilter.forExpectedElements(10000);
+            }
 
-        // Get player chunk position
-        int playerChunkX = state.player.getBlockX() >> 5; // 32-block sections
-        int playerChunkZ = state.player.getBlockZ() >> 5;
+            int px = player.getBlockX() >> 5;
+            int pz = player.getBlockZ() >> 5;
+            if (px != state.lastPlayerSectionX || pz != state.lastPlayerSectionZ) {
+                state.currentRing = 0;
+                state.consecutiveEmptyRings = 0;
+                state.lastPlayerSectionX = px;
+                state.lastPlayerSectionZ = pz;
+            }
 
-        // Stream sections in current ring
-        for (int dx = -currentRing; dx <= currentRing; dx++) {
-            for (int dz = -currentRing; dz <= currentRing; dz++) {
-                // Only process ring boundary (or ring 0 which is just center)
-                if (currentRing > 0 && Math.abs(dx) != currentRing && Math.abs(dz) != currentRing) {
+            int radius = effectiveRadius(state);
+
+            // 1. Drain recently-dirty sections near this player
+            int dirtyFlushed = drainDirtyNear(state, px, pz, radius);
+
+            // 2. Expand the current ring
+            int sectionsFound = streamRing(state, px, pz, state.currentRing, radius);
+
+            if (sectionsFound > 0 || dirtyFlushed > 0) {
+                state.consecutiveEmptyRings = 0;
+            } else if (state.currentRing >= radius) {
+                state.consecutiveEmptyRings++;
+            }
+
+            if (state.currentRing < radius) {
+                state.currentRing++;
+            }
+
+            // Switch to slow-tick once we've exhausted active rings, but the dirty-push
+            // path still drains on every tick so newly generated sections stream in.
+            if (state.consecutiveEmptyRings >= 5 && !state.inMaintenance) {
+                state.inMaintenance = true;
+                long slow = Math.max(50L, (long) (1000.0 / Math.max(0.1, config.maintenanceTickHz)));
+                rescheduleTick(state, slow);
+                savePlayerCacheAsync(player.getUUID(), state.clientCacheFilter);
+                Logger.info("Entering maintenance mode for " + player.getName().getString() +
+                        " (slowTick=" + slow + "ms)");
+            } else if (state.consecutiveEmptyRings < 5 && state.inMaintenance) {
+                state.inMaintenance = false;
+                long fast = Math.max(20L, (long) (1000.0 / Math.max(1.0, config.activeTickHz)));
+                rescheduleTick(state, fast);
+                Logger.info("Returning to active streaming for " + player.getName().getString() +
+                        " (fastTick=" + fast + "ms)");
+            }
+        } catch (Throwable t) {
+            Logger.error("tickPlayer failed", t);
+        }
+    }
+
+    private void rescheduleTick(PlayerStreamingState state, long periodMs) {
+        if (state.scheduledHandle != null) {
+            state.scheduledHandle.cancel(false);
+        }
+        state.scheduledHandle = scheduler.scheduleAtFixedRate(
+                () -> tickPlayer(state), 0L, periodMs, TimeUnit.MILLISECONDS);
+    }
+
+    private int effectiveRadius(PlayerStreamingState state) {
+        // Internal computations stay in voxy-section units (32 blocks each); the
+        // config exposes everything in vanilla chunks (16 blocks) for clarity.
+        int cap = config.getMaxStreamingRadiusSections();
+        if (state.clientHintedRadius > 0) {
+            cap = Math.min(cap, Math.max(state.clientHintedRadius, 1));
+        }
+        cap = Math.min(cap, config.getClientHintRadiusCapSections());
+        return Math.max(1, cap);
+    }
+
+    private int drainDirtyNear(PlayerStreamingState state, int px, int pz, int radius) {
+        List<Long> snap = snapshotDirty();
+        if (snap.isEmpty()) {
+            return 0;
+        }
+        int flushed = 0;
+        int outOfRange = 0;
+        for (Long key : snap) {
+            int sx = WorldEngine.getX(key);
+            int sz = WorldEngine.getZ(key);
+            int dx = Math.abs(sx - px);
+            int dz = Math.abs(sz - pz);
+            if (Math.max(dx, dz) > radius) {
+                outOfRange++;
+                continue;
+            }
+            if (maybeQueueSection(state, key)) {
+                flushed++;
+            }
+        }
+        if (snap.size() >= 64 || flushed > 0) {
+            Logger.info("[VoxyStream] " + state.player.getName().getString() +
+                    " drained " + snap.size() + " dirty keys @ section(" + px + "," + pz +
+                    ") r=" + radius + " → flushed=" + flushed + " out-of-range=" + outOfRange);
+        }
+        return flushed;
+    }
+
+    private int streamRing(PlayerStreamingState state, int px, int pz, int ring, int radius) {
+        if (ring > radius) {
+            return 0;
+        }
+        int found = 0;
+        for (int dx = -ring; dx <= ring; dx++) {
+            for (int dz = -ring; dz <= ring; dz++) {
+                if (ring > 0 && Math.abs(dx) != ring && Math.abs(dz) != ring) {
                     continue;
                 }
-
-                int sectionX = playerChunkX + dx;
-                int sectionZ = playerChunkZ + dz;
-
-                // Stream all Y levels and LOD levels
+                int sectionX = px + dx;
+                int sectionZ = pz + dz;
                 for (int lvl = WorldEngine.MAX_LOD_LAYER; lvl >= 0; lvl--) {
-                    for (int y = -4; y < 20; y++) { // Reasonable Y range
+                    for (int y = minSectionY; y < maxSectionYExclusive; y++) {
                         long key = WorldEngine.getWorldSectionId(lvl, sectionX, y, sectionZ);
-
-                        // Check if section exists on server (regardless of bloom filter)
-                        WorldSection section = worldEngine.acquireIfExists(key);
-                        if (section != null) {
-                            try {
-                                // For Level 0: check block count
-                                // For Level 1+: check child existence mask to ensure it's non-zero
-                                boolean hasContent;
-                                if (lvl == 0) {
-                                    hasContent = section.getNonEmptyBlockCount() > 0;
-                                } else {
-                                    // Level 1+ sections must have a non-zero child existence mask
-                                    // This prevents sending sections that would cause "existence mask of 0"
-                                    // warnings on client
-                                    byte childMask = section.getNonEmptyChildren();
-                                    hasContent = childMask != 0;
-                                }
-
-                                if (hasContent) {
-                                    sectionsFound++; // Server has this section
-
-                                    // Skip if already sent or in bloom filter
-                                    if (state.sentSections.contains(key) ||
-                                            state.clientCacheFilter.mightContain(key)) {
-                                        continue;
-                                    }
-
-                                    // Send this section
-                                    byte[] data = SectionSerializer.serialize(section);
-                                    state.sender.queueSection(data, (int) key);
-                                    state.sentSections.add(key);
-                                    state.clientCacheFilter.add(key); // Track in bloom filter for persistence
-                                    sectionsQueued++;
-                                }
-                            } finally {
-                                section.release();
-                            }
+                        if (maybeQueueSection(state, key)) {
+                            found++;
                         }
                     }
                 }
             }
         }
-
-        // Track empty rings to detect edge of available data
-        // Only count as "empty" if server has NO sections in this ring at all
-        if (sectionsFound > 0) {
-            state.consecutiveEmptyRings = 0;
-            if (sectionsQueued > 0) {
-                Logger.info("Queued " + sectionsQueued + " sections for " +
-                        state.player.getName().getString() + " (ring " + currentRing +
-                        ", found " + sectionsFound + ")");
-            }
-        } else {
-            state.consecutiveEmptyRings++;
-        }
-
-        state.currentRing++;
-
-        // Calculate delay based on distance (further rings = slower)
-        // Base: 100ms, increases with distance up to max 2000ms
-        long delayMs = Math.min(100 + (currentRing * 20L), 2000);
-
-        // If we've hit several consecutive empty rings, switch to maintenance mode
-        if (state.consecutiveEmptyRings >= 5) {
-            // Save bloom filter before entering maintenance mode
-            savePlayerCache(state.player.getUUID(), state.clientCacheFilter);
-            Logger.info("Entering maintenance mode for " + state.player.getName().getString() +
-                    " (reached edge of LOD data at ring " + currentRing + ")");
-
-            // Schedule periodic rescan (every 30 seconds) to pick up new LODs
-            scheduleMaintenanceScan(state);
-        } else if (isActive.get()) {
-            // Continue streaming next ring
-            scheduler.schedule(() -> startStreaming(state), delayMs, TimeUnit.MILLISECONDS);
-        }
+        return found;
     }
 
     /**
-     * Maintenance mode - periodically rescans from player position for new LODs.
+     * Queue a section for streaming if (a) it exists, (b) has content, and
+     * (c) its {@link WorldSection#getVersion()} is newer than the last copy we
+     * sent to this player. Returns {@code true} iff the section was queued.
      */
-    private void scheduleMaintenanceScan(PlayerStreamingState state) {
-        if (!isActive.get() || !state.player.isAlive()) {
-            return;
+    private boolean maybeQueueSection(PlayerStreamingState state, long key) {
+        WorldSection section = worldEngine.acquireIfExists(key);
+        if (section == null) {
+            return false;
         }
-
-        // Schedule a rescan starting from ring 0 after 30 seconds
-        scheduler.schedule(() -> {
-            if (isActive.get() && state.player.isAlive()) {
-                state.currentRing = 0;
-                state.consecutiveEmptyRings = 0;
-                Logger.info("Starting maintenance scan for " + state.player.getName().getString());
-                startStreaming(state);
+        try {
+            int lvl = WorldEngine.getLevel(key);
+            boolean hasContent;
+            if (lvl == 0) {
+                hasContent = section.getNonEmptyBlockCount() > 0;
+            } else {
+                byte childMask = section.getNonEmptyChildren();
+                hasContent = childMask != 0;
             }
-        }, 30, TimeUnit.SECONDS);
+            if (!hasContent) {
+                return false;
+            }
+            long version = section.getVersion();
+            Long lastSent = state.lastSentVersion.get(key);
+            if (lastSent != null && lastSent >= version) {
+                return false;
+            }
+
+            // Try the shared cache first.
+            byte[] data = lookupOrSerialize(section, version);
+            if (data == null) {
+                return false;
+            }
+
+            // Hand off to ChunkedLodSender (bandwidth-controlled).
+            state.sender.queueSection(data, (int) key);
+            state.lastSentVersion.put(key, version);
+            state.clientCacheFilter.add(key);
+            return true;
+        } finally {
+            section.release();
+        }
     }
 
-    /**
-     * Handle cache response from client (bloom filter).
-     */
+    private byte[] lookupOrSerialize(WorldSection section, long version) {
+        long key = section.key;
+        synchronized (cacheLock) {
+            CachedSection cached = serializedCache.get(key);
+            if (cached != null && cached.version == version) {
+                return cached.data;
+            }
+        }
+        // Serialize off the scheduler thread for big sections. For the very first
+        // request this still runs synchronously on the scheduler — the cost is the
+        // same as before but subsequent players hit the cache.
+        byte[] data;
+        try {
+            data = SectionSerializer.serialize(section);
+        } catch (Throwable t) {
+            Logger.error("Failed to serialize section " + WorldEngine.pprintPos(key), t);
+            return null;
+        }
+        synchronized (cacheLock) {
+            serializedCache.put(key, new CachedSection(version, data));
+        }
+        return data;
+    }
+
     public void handleCacheResponse(ServerPlayer player, VoxyPacketPayload payload) {
         BloomFilter clientCache = payload.parseCacheResponseBloomFilter();
         PlayerStreamingState state = playerStates.get(player.getUUID());
-
-        if (state != null) {
-            // Ensure we have a properly-sized filter
-            if (state.clientCacheFilter == null) {
-                state.clientCacheFilter = BloomFilter.forExpectedElements(10000);
-            }
-
-            // Merge client's filter into our properly-sized one
-            // This picks up any sections the client already has (if they report them)
-            if (clientCache != null && clientCache.getSerializedSize() > 100) {
-                state.clientCacheFilter.merge(clientCache);
-                Logger.info("Merged client bloom filter for " + player.getName().getString());
-            } else {
-                Logger.info("Client bloom filter too small, using server-side only for " +
-                        player.getName().getString());
-            }
-            // Don't save immediately - wait until actual sections are sent
+        if (state == null) {
+            return;
+        }
+        if (state.clientCacheFilter == null) {
+            state.clientCacheFilter = BloomFilter.forExpectedElements(10000);
+        }
+        if (clientCache != null && clientCache.getSerializedSize() > 100) {
+            state.clientCacheFilter.merge(clientCache);
+            Logger.info("Merged client bloom filter for " + player.getName().getString());
+        } else {
+            Logger.info("Client bloom filter too small, using server-side only for " +
+                    player.getName().getString());
         }
     }
 
-    /**
-     * Called when a player disconnects.
-     */
     public void onPlayerDisconnect(UUID playerId) {
         PlayerStreamingState state = playerStates.remove(playerId);
         if (state != null) {
-            // Save bloom filter before closing
             if (state.clientCacheFilter != null) {
-                savePlayerCache(playerId, state.clientCacheFilter);
+                savePlayerCacheAsync(playerId, state.clientCacheFilter);
             }
+            cancel(state);
             state.close();
         }
         VoxyNetworkHandler.removePlayer(playerId);
     }
 
-    /**
-     * Get streaming stats for a player.
-     */
+    private void cancel(PlayerStreamingState state) {
+        if (state.scheduledHandle != null) {
+            state.scheduledHandle.cancel(false);
+            state.scheduledHandle = null;
+        }
+    }
+
     public String getPlayerStats(UUID playerId) {
         PlayerStreamingState state = playerStates.get(playerId);
         if (state == null) {
             return "No active streaming";
         }
-        return state.sender.getStatsString() +
-                ", Sent: " + state.sentSections.size();
+        return state.sender.getStatsString() + ", Sent: " + state.lastSentVersion.size();
+    }
+
+    /**
+     * Drop the per-player "already sent" tracking and rewind ring expansion so
+     * every section in range is re-serialized and resent to that client. Used by
+     * {@code /voxyadmin resync} to recover from missing LODs without forcing
+     * the client to disconnect.
+     */
+    public int resyncPlayer(UUID playerId) {
+        PlayerStreamingState state = playerStates.get(playerId);
+        if (state == null) {
+            return 0;
+        }
+        int previouslySent = state.lastSentVersion.size();
+        state.lastSentVersion.clear();
+        state.currentRing = 0;
+        state.consecutiveEmptyRings = 0;
+        state.inMaintenance = false;
+        state.lastPlayerSectionX = Integer.MIN_VALUE;
+        state.lastPlayerSectionZ = Integer.MIN_VALUE;
+        state.clientCacheFilter = BloomFilter.forExpectedElements(10000);
+        // Also drop any cached serialized bytes — they may be stale relative to the
+        // engine's current state after a regen.
+        synchronized (cacheLock) {
+            serializedCache.clear();
+        }
+        long periodMs = Math.max(20L, (long) (1000.0 / Math.max(1.0, config.activeTickHz)));
+        if (state.scheduledHandle != null) {
+            state.scheduledHandle.cancel(false);
+        }
+        state.scheduledHandle = scheduler.scheduleAtFixedRate(
+                () -> tickPlayer(state), 0L, periodMs, TimeUnit.MILLISECONDS);
+        return previouslySent;
+    }
+
+    /**
+     * Resync every player currently being tracked.
+     * @return number of players that were resynced.
+     */
+    public int resyncAll() {
+        int n = 0;
+        for (UUID id : new ArrayList<>(playerStates.keySet())) {
+            if (resyncPlayer(id) >= 0) {
+                n++;
+            }
+        }
+        return n;
     }
 
     @Override
     public void close() {
         isActive.set(false);
         scheduler.shutdown();
+        serializeExecutor.shutdown();
 
         for (PlayerStreamingState state : playerStates.values()) {
+            cancel(state);
             state.close();
         }
         playerStates.clear();
 
-        // Release the world engine reference
+        synchronized (cacheLock) {
+            serializedCache.clear();
+        }
+        synchronized (dirtyLock) {
+            recentlyDirtyKeys.clear();
+        }
+
         try {
             worldEngine.releaseRef();
         } catch (Exception e) {
@@ -406,19 +546,68 @@ public class LodStreamingService implements AutoCloseable {
         Logger.info("LodStreamingService closed");
     }
 
-    /**
-     * Per-player streaming state.
-     */
+    // ==================== Bloom-filter persistence (async I/O) ==================== //
+
+    private Path getCacheDir() {
+        return Path.of("voxy_cache", "player_bloom_filters");
+    }
+
+    private void savePlayerCacheAsync(UUID playerId, BloomFilter filter) {
+        if (filter == null) {
+            return;
+        }
+        serializeExecutor.submit(() -> savePlayerCache(playerId, filter));
+    }
+
+    private void savePlayerCache(UUID playerId, BloomFilter filter) {
+        try {
+            Path dir = getCacheDir();
+            Files.createDirectories(dir);
+            Path cacheFile = dir.resolve(playerId.toString() + ".bloom");
+            Files.write(cacheFile, filter.toBytes());
+        } catch (IOException e) {
+            Logger.error("Failed to save bloom filter for " + playerId + ": " + e.getMessage());
+        }
+    }
+
+    private BloomFilter loadPlayerCache(UUID playerId) {
+        try {
+            Path cacheFile = getCacheDir().resolve(playerId.toString() + ".bloom");
+            if (!Files.exists(cacheFile)) {
+                return null;
+            }
+            byte[] data = Files.readAllBytes(cacheFile);
+            if (data.length < 1000) {
+                Files.delete(cacheFile);
+                return null;
+            }
+            return BloomFilter.fromBytes(data);
+        } catch (IOException e) {
+            Logger.error("Failed to load bloom filter for " + playerId + ": " + e.getMessage());
+            return null;
+        }
+    }
+
+    // ==================== Inner types ==================== //
+
     private static class PlayerStreamingState {
         ServerPlayer player;
         final ChunkedLodSender sender;
-        final Set<Long> sentSections = ConcurrentHashMap.newKeySet();
 
-        // Streaming state
+        // Resend-on-update: server section version > stored version → resend.
+        final ConcurrentHashMap<Long, Long> lastSentVersion = new ConcurrentHashMap<>();
+
         int currentRing = 0;
         int consecutiveEmptyRings = 0;
+        boolean inMaintenance = false;
         int clientDesiredRate = SharedBandwidthLimit.DEFAULT_PLAYER_LIMIT_KBPS;
+        int clientHintedRadius = 0; // 0 = use server default
         BloomFilter clientCacheFilter = null;
+
+        int lastPlayerSectionX = Integer.MIN_VALUE;
+        int lastPlayerSectionZ = Integer.MIN_VALUE;
+
+        ScheduledFuture<?> scheduledHandle;
 
         PlayerStreamingState(ServerPlayer player, SharedBandwidthLimit sharedLimit, int limitKBps) {
             this.player = player;
@@ -429,4 +618,6 @@ public class LodStreamingService implements AutoCloseable {
             sender.close();
         }
     }
+
+    private record CachedSection(long version, byte[] data) {}
 }

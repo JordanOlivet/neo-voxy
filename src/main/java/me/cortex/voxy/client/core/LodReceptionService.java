@@ -1,5 +1,6 @@
 package me.cortex.voxy.client.core;
 
+import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.network.ClientCongestionControl;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.network.BloomFilter;
@@ -66,6 +67,17 @@ public class LodReceptionService implements AutoCloseable {
     /** Whether we've already requested sync */
     private volatile boolean syncRequested = false;
 
+    /**
+     * True when the active connection lacks the Voxy channel (vanilla server) or
+     * the user has forced {@code CLIENT_ONLY}. In that case we never send sync
+     * requests and the client falls back to local chunk ingest (handled by
+     * {@code ClientChunkIngestListener}).
+     */
+    private volatile boolean localMode = false;
+
+    /** Last MC dimension key observed — drives auto-resync on dimension change. */
+    private volatile net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> lastDimension = null;
+
     public LodReceptionService(WorldEngine worldEngine, Mapper clientMapper,
             me.cortex.voxy.client.core.model.ModelBakerySubsystem modelBakery) {
         this.worldEngine = worldEngine;
@@ -94,7 +106,43 @@ public class LodReceptionService implements AutoCloseable {
             return;
         }
 
+        // Auto-resync on dimension change. Comparing ResourceKey is cheap and
+        // catches both respawn-via-portal and the rare manual /execute-in cases.
+        var mc = net.minecraft.client.Minecraft.getInstance();
+        if (mc != null && mc.level != null) {
+            var dim = mc.level.dimension();
+            if (dim != null && dim != lastDimension) {
+                if (lastDimension != null) {
+                    Logger.info("Dimension changed (" + lastDimension.location() + " → " + dim.location() +
+                            "), re-issuing LOD sync");
+                    resetForReconnect();
+                }
+                lastDimension = dim;
+            }
+        }
+
         if (!VoxyNetworkHandler.shouldEnableStreaming()) {
+            return;
+        }
+
+        if (localMode) {
+            // Process pending sections in case the player ingested locally and models
+            // just became available.
+            if (!pendingSections.isEmpty()) {
+                processPendingSections();
+            }
+            return;
+        }
+
+        // Resolve the effective mode on first tick after connect.
+        VoxyConfig.MultiplayerMode mode = VoxyNetworkHandler.getEffectiveMode();
+        if (mode == VoxyConfig.MultiplayerMode.CLIENT_ONLY) {
+            if (!syncRequested) {
+                Logger.info("LodReceptionService: server lacks Voxy channel (or CLIENT_ONLY forced), switching to client-local ingest");
+            }
+            syncRequested = true;
+            localMode = true;
+            mapperReady = true; // we will use the client mapper directly; no remap needed
             return;
         }
 
@@ -102,13 +150,37 @@ public class LodReceptionService implements AutoCloseable {
         if (!syncRequested) {
             syncRequested = true;
             Logger.info("Requesting LOD sync for server-driven streaming");
-            VoxyNetworkHandler.sendToServer(VoxyPacketPayload.syncRequest());
+            boolean sent = VoxyNetworkHandler.sendToServer(VoxyPacketPayload.syncRequest());
+            if (!sent) {
+                Logger.warn("Initial sync request not delivered — falling back to client-local ingest");
+                localMode = true;
+                mapperReady = true;
+            }
         }
 
         // Process pending sections whose models are now available
         if (!pendingSections.isEmpty()) {
             processPendingSections();
         }
+    }
+
+    public boolean isLocalMode() {
+        return localMode;
+    }
+
+    /**
+     * Reset the sync-request state on world / dimension transition so a fresh
+     * connection retries the handshake from scratch.
+     */
+    public void resetForReconnect() {
+        syncRequested = false;
+        mapperReady = false;
+        localMode = false;
+        receivedSections.clear();
+        pendingSections.clear();
+        reassemblyBuffers.clear();
+        idRemapper.reset();
+        VoxyNetworkHandler.resetConnectionState();
     }
 
     /**
@@ -248,9 +320,13 @@ public class LodReceptionService implements AutoCloseable {
                 // Update non-empty children
                 section._unsafeSetNonEmptyChildren(sectionData.nonEmptyChildren);
 
-                // Mark dirty to trigger rendering - must use worldEngine.markDirty()
-                // to trigger the dirty callback that notifies the render system
-                worldEngine.markDirty(section);
+                // Server-streamed sections never went through WorldUpdater.insertUpdate
+                // on the client, so the render system has no idea that the new section's
+                // 6 neighbors need their boundary meshes re-built. Without this the
+                // section boundaries stay rendered against stale neighbor data and you
+                // get a visible grid of seams (the "quadrillage") on dimension reload
+                // or after Chunky generation. Force a full neighbor remesh.
+                worldEngine.markDirty(section, WorldEngine.DEFAULT_UPDATE_FLAGS, 0b111111);
 
                 sectionsApplied.incrementAndGet();
 

@@ -1,5 +1,6 @@
 package me.cortex.voxy;
 
+import me.cortex.voxy.client.ClientChunkIngestListener;
 import me.cortex.voxy.client.VoxyClient;
 import me.cortex.voxy.client.VoxyCommands;
 import me.cortex.voxy.client.VoxyDebugScreenEntry;
@@ -44,6 +45,7 @@ public class Voxy {
             NeoForge.EVENT_BUS.addListener(this::onRegisterClientCommands);
             NeoForge.EVENT_BUS.register(VoxyDebugScreenEntry.class);
             NeoForge.EVENT_BUS.register(DebugSidecarListener.class);
+            NeoForge.EVENT_BUS.register(ClientChunkIngestListener.class);
         }
     }
 

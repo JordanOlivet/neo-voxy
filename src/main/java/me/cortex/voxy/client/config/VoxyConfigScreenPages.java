@@ -8,6 +8,7 @@ import me.cortex.voxy.client.mixin.sodium.AccessorSodiumWorldRenderer;
 import me.cortex.voxy.common.util.cpu.CpuLayout;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import net.caffeinemc.mods.sodium.client.gui.options.*;
+import net.caffeinemc.mods.sodium.client.gui.options.control.CyclingControl;
 import net.caffeinemc.mods.sodium.client.gui.options.control.SliderControl;
 import net.caffeinemc.mods.sodium.client.gui.options.control.TickBoxControl;
 import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
@@ -92,6 +93,18 @@ public abstract class VoxyConfigScreenPages {
                         .setTooltip(Component.translatable("voxy.config.general.ingest.tooltip"))
                         .setControl(TickBoxControl::new)
                         .setBinding((s, v) -> s.ingestEnabled = v, s -> s.ingestEnabled)
+                        .setImpact(OptionImpact.MEDIUM)
+                        .build())
+                .add(OptionImpl.createBuilder(VoxyConfig.MultiplayerMode.class, storage)
+                        .setName(Component.translatable("voxy.config.general.multiplayerMode"))
+                        .setTooltip(Component.translatable("voxy.config.general.multiplayerMode.tooltip"))
+                        .setControl(opt -> new CyclingControl<>(opt, VoxyConfig.MultiplayerMode.class,
+                                new Component[] {
+                                        Component.translatable("voxy.config.general.multiplayerMode.auto"),
+                                        Component.translatable("voxy.config.general.multiplayerMode.client_only"),
+                                        Component.translatable("voxy.config.general.multiplayerMode.server_stream")
+                                }))
+                        .setBinding((s, v) -> s.multiplayerMode = v, s -> s.multiplayerMode)
                         .setImpact(OptionImpact.MEDIUM)
                         .build())
                 .build());

@@ -25,9 +25,23 @@ public class VoxyConfig implements OptionStorage<VoxyConfig> {
 
     public static VoxyConfig CONFIG = loadOrCreate();
 
+    /**
+     * How the client should behave when joining a multiplayer server.
+     * <ul>
+     * <li>{@code AUTO} — detect at connect time. Server has Voxy → use server
+     * streaming. No Voxy → ingest local chunks.</li>
+     * <li>{@code CLIENT_ONLY} — always ingest locally, ignore any server-side
+     * Voxy. Useful as an escape hatch when the server streams too slowly.</li>
+     * <li>{@code SERVER_STREAM} — require server-side Voxy. If absent, disable
+     * Voxy rendering with a chat warning.</li>
+     * </ul>
+     */
+    public enum MultiplayerMode { AUTO, CLIENT_ONLY, SERVER_STREAM }
+
     public boolean enabled = true;
     public boolean enableRendering = true;
     public boolean ingestEnabled = true;
+    public MultiplayerMode multiplayerMode = MultiplayerMode.AUTO;
     public int sectionRenderDistance = 16;
     public int serviceThreads = (int) Math.max(CpuLayout.getCoreCount() / 1.5, 1);
     public float subDivisionSize = 64;

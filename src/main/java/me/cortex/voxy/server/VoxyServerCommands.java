@@ -5,6 +5,7 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.world.WorldEngine;
+import me.cortex.voxy.common.world.service.LodStreamingService;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
 import net.minecraft.commands.CommandSourceStack;
@@ -13,6 +14,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.chunk.LevelChunk;
 
 import java.util.Collection;
 import java.util.HashMap;
@@ -79,7 +81,23 @@ public class VoxyServerCommands {
 
                 // /voxyadmin broadcast - Broadcast sync to all players
                 .then(Commands.literal("broadcast")
-                        .executes(context -> broadcastSync(context.getSource())));
+                        .executes(context -> broadcastSync(context.getSource())))
+
+                // /voxyadmin regen <radiusChunks> - re-ingest currently-loaded chunks
+                // around the source position. Useful when LODs are missing because
+                // the original ChunkEvent.Load skipped (proto-chunk, no lighting yet).
+                .then(Commands.literal("regen")
+                        .then(Commands.argument("radiusChunks", IntegerArgumentType.integer(1, 1024))
+                                .executes(context -> regenAroundSource(
+                                        context.getSource(),
+                                        IntegerArgumentType.getInteger(context, "radiusChunks")))))
+
+                // /voxyadmin resync - clear per-player lastSentVersion + ring origin
+                // so every section currently in engine is resent to every connected
+                // player. Does NOT re-ingest chunks; pair with /voxyadmin regen if
+                // the engine itself is missing data.
+                .then(Commands.literal("resync")
+                        .executes(context -> resyncCurrentLevel(context.getSource())));
 
         dispatcher.register(voxyCommand);
         Logger.info("Registered VoxyAdmin server commands");
@@ -259,6 +277,92 @@ public class VoxyServerCommands {
      */
     private static ChunkFileProcessor getOrCreateProcessor(ServerLevel level) {
         return processors.computeIfAbsent(level, ChunkFileProcessor::new);
+    }
+
+    /**
+     * Re-ingest every chunk currently loaded by the server in a radius (in
+     * vanilla chunks) around the command source. This is the recovery path when
+     * Voxy missed a chunk on its first {@code ChunkEvent.Load} (proto-chunk, no
+     * lighting yet). Chunks that aren't loaded server-side are skipped silently
+     * — they will be picked up by the normal event when they next load.
+     */
+    private static int regenAroundSource(CommandSourceStack source, int radiusChunks) {
+        if (!(source.getLevel() instanceof ServerLevel serverLevel)) {
+            source.sendFailure(Component.literal("This command must be run in a server world"));
+            return 0;
+        }
+        var instance = VoxyCommon.getInstance();
+        if (instance == null) {
+            source.sendFailure(Component.literal("VoxyCommon not initialized"));
+            return 0;
+        }
+        WorldIdentifier worldId = WorldIdentifier.of(serverLevel);
+        if (worldId == null) {
+            source.sendFailure(Component.literal("WorldIdentifier null for this level"));
+            return 0;
+        }
+        if (!instance.isIngestEnabled(worldId)) {
+            source.sendFailure(Component.literal("Ingest disabled for this world"));
+            return 0;
+        }
+        WorldEngine engine = instance.getOrCreate(worldId);
+        if (engine == null) {
+            source.sendFailure(Component.literal("Failed to obtain WorldEngine"));
+            return 0;
+        }
+
+        BlockPos center = BlockPos.containing(source.getPosition());
+        int centerChunkX = center.getX() >> 4;
+        int centerChunkZ = center.getZ() >> 4;
+
+        int queued = 0;
+        int notLoaded = 0;
+        var chunkSource = serverLevel.getChunkSource();
+        for (int dx = -radiusChunks; dx <= radiusChunks; dx++) {
+            for (int dz = -radiusChunks; dz <= radiusChunks; dz++) {
+                int cx = centerChunkX + dx;
+                int cz = centerChunkZ + dz;
+                LevelChunk chunk = chunkSource.getChunkNow(cx, cz);
+                if (chunk == null) {
+                    notLoaded++;
+                    continue;
+                }
+                try {
+                    if (instance.getIngestService().enqueueIngest(engine, chunk)) {
+                        queued++;
+                    }
+                } catch (Exception e) {
+                    Logger.error("regen failed at " + chunk.getPos(), e);
+                }
+            }
+        }
+        final int qF = queued;
+        final int nF = notLoaded;
+        source.sendSuccess(() -> Component.literal(
+                "Regen: " + qF + " chunks re-ingested, " + nF + " not currently loaded (within " +
+                        radiusChunks + "-chunk radius)"), true);
+        return qF;
+    }
+
+    /**
+     * Reset every connected player's "already sent" tracking on the current
+     * level's {@link LodStreamingService}. The next streaming tick will resend
+     * all in-range sections from scratch.
+     */
+    private static int resyncCurrentLevel(CommandSourceStack source) {
+        if (!(source.getLevel() instanceof ServerLevel serverLevel)) {
+            source.sendFailure(Component.literal("This command must be run in a server world"));
+            return 0;
+        }
+        LodStreamingService service = VoxyServer.getStreamingService(serverLevel);
+        if (service == null) {
+            source.sendFailure(Component.literal("No streaming service for this level (no player has synced yet)"));
+            return 0;
+        }
+        int n = service.resyncAll();
+        source.sendSuccess(() -> Component.literal("Resynced " + n + " player(s) on " +
+                serverLevel.dimension().location()), true);
+        return n;
     }
 
     /**
