@@ -63,11 +63,6 @@ uint getFace() {
     return (interData.x>>4)&7u;
 }
 
-#ifdef PATCHED_SHADER
-vec2 getLightmap() {
-    return clamp(vec2((interData.y>>4)&0xFu, interData.y&0xFu)/15, vec2(8.0f/256), vec2(248.0f/256));
-}
-#endif
 
 uint getModelId() {
     return interData.x>>16;
@@ -220,7 +215,7 @@ void main() {
 
     uint face = getFace();
     face ^= uint((face&1u)!=uint(gl_FrontFacing!=((face>>1)!=0u)));
-    voxy_emitFragment(VoxyFragmentParameters(colour, tile, texPos, face, modelId, getLightmap(), tint, model.customId));
+    voxy_emitFragment(VoxyFragmentParameters(colour, tile, texPos, face, modelId, getLightmapUv(interData.y), tint, model.customId));
 
     #endif
 }

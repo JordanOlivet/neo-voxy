@@ -48,17 +48,17 @@ public abstract class MixinDefaultChunkRenderer extends ShaderChunkRenderer {
 
     @Unique
     private void doRender(ChunkRenderMatrices matrices, TerrainRenderPass renderPass, CameraTransform camera) {
+        // Match origine voxy 12111 branch: only CUTOUT pass triggers Voxy LOD render.
+        // TRANSLUCENT pass NOT intercepted — origine renders LOD translucent inline
+        // during runPipeline, then vanilla translucent draws normally on top via Sodium.
+        // Our previous TRANSLUCENT branch (calling blitOverTranslucent) caused vanilla
+        // water/ice to be overwritten by GL_ALWAYS re-blit of Voxy framebuffer.
         if (renderPass == DefaultTerrainRenderPasses.CUTOUT) {
             var renderer = ((IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer).getVoxyRenderSystem();
             if (renderer != null) {
                 me.cortex.voxy.client.core.rendering.Viewport<?> viewport = renderer.setupViewport(matrices, camera.x,
                         camera.y, camera.z);
                 renderer.renderOpaque(viewport);
-            }
-        } else if (renderPass == DefaultTerrainRenderPasses.TRANSLUCENT) {
-            var renderer = ((IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer).getVoxyRenderSystem();
-            if (renderer != null) {
-                renderer.blitOverTranslucent();
             }
         }
     }

@@ -50,9 +50,11 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
     protected AbstractSectionRenderer<?,?> sectionRenderer;
 
-    private final FullscreenBlit depthMaskBlit = new FullscreenBlit("voxy:post/fullscreen2.vert", "voxy:post/noop.frag");
-    private final FullscreenBlit depthSetBlit = new FullscreenBlit("voxy:post/fullscreen2.vert", "voxy:post/depth0.frag");
-    private final FullscreenBlit depthCopy = new FullscreenBlit("voxy:post/fullscreen2.vert", "voxy:post/depth_copy.frag");
+    // Single-pass depth+stencil setup (ported from origine commit 6172a886).
+    // Replaces the prior 3-pass (depth_copy + noop + depth0) approach: the new shader
+    // sets gl_FragDepth=NEAR and discards where vanilla depth==FAR (no vanilla geometry),
+    // letting one fullscreen blit produce the same stencil/depth state atomically.
+    private final FullscreenBlit depthStencilSetup = new FullscreenBlit("voxy:post/fullscreen2.vert", "voxy:post/setup_stencil_depth.frag");
     private static final int DEPTH_SAMPLER = glGenSamplers();
     static {
         glSamplerParameteri(DEPTH_SAMPLER, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -109,49 +111,38 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     }
 
     protected void initDepthStencil(int sourceFrameBuffer, int targetFb, int srcWidth, int srcHeight, int width, int height) {
+        // Single-pass depth+stencil setup ported from origine commit 6172a886.
+        // Replaces the previous 3-pass approach (depth_copy -> noop with NOTEQUAL ->
+        // depth0 with stencil==0). The new shader sets gl_FragDepth=NEAR and discards
+        // where vanilla depth==FAR, leaving the cleared depth/stencil values in place
+        // for sky pixels and writing depth=NEAR + stencil=0 for vanilla-rendered pixels.
+        // After the blit, we configure stencil for LOD rendering: GL_EQUAL,1 — only
+        // render where vanilla did NOT draw (stencil unchanged from cleared value 1).
         glClearNamedFramebufferfi(targetFb, GL_DEPTH_STENCIL, 0, 1.0f, 1);
-        // using blit to copy depth from mismatched depth formats is not portable so instead a full screen pass is performed for a depth copy
-        // the mismatched formats in this case is the d32 to d24s8
         glBindFramebuffer(GL30.GL_FRAMEBUFFER, targetFb);
 
-        this.depthCopy.bind();
-        int depthTexture = glGetNamedFramebufferAttachmentParameteri(sourceFrameBuffer, GL_DEPTH_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
-        glBindTextureUnit(0, depthTexture);
-        glBindSampler(0, DEPTH_SAMPLER);
-        glUniform2f(1,((float)width)/srcWidth, ((float)height)/srcHeight);
-        glColorMask(false,false,false,false);
-        this.depthCopy.blit();
+        // If pixel passes shader (vanilla depth != FAR), update stencil to 0 and depth to NEAR
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_ALWAYS);
 
-        /*
-        if (Capabilities.INSTANCE.isMesa){
-            glClearStencil(1);
-            glClear(GL_STENCIL_BUFFER_BIT);
-        }*/
-
-        //This whole thing is hell, we basicly want to create a mask stenicel/depth mask specificiclly
-        // in theory we could do this in a single pass by passing in the depth buffer from the sourceFrambuffer
-        // but the current implmentation does a 2 pass system
         glEnable(GL_STENCIL_TEST);
         glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
         glStencilFunc(GL_ALWAYS, 0, 0xFF);
         glStencilMask(0xFF);
 
-        glEnable(GL_DEPTH_TEST);
-        glDepthFunc(GL_NOTEQUAL);//If != 1 pass
-        //We do here
-        this.depthMaskBlit.blit();
-        glDisable(GL_DEPTH_TEST);
-
-        //Blit depth 0 where stencil is 0
-        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-        glStencilFunc(GL_EQUAL, 0, 0xFF);
-
-        this.depthSetBlit.blit();
+        this.depthStencilSetup.bind();
+        int depthTexture = glGetNamedFramebufferAttachmentParameteri(sourceFrameBuffer, GL_DEPTH_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
+        glBindTextureUnit(0, depthTexture);
+        glBindSampler(0, DEPTH_SAMPLER);
+        glUniform2f(1, ((float)width)/srcWidth, ((float)height)/srcHeight);
+        glDepthMask(true);
+        glColorMask(false, false, false, false);
+        this.depthStencilSetup.blit();
 
         glDepthFunc(GL_LEQUAL);
-        glColorMask(true,true,true,true);
+        glColorMask(true, true, true, true);
 
-        //Make voxy terrain render only where there isnt mc terrain
+        // Make voxy terrain render only where there isn't mc terrain
         glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
         glStencilFunc(GL_EQUAL, 1, 0xFF);
     }
@@ -209,9 +200,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     @Override
     protected void free0() {
         this.sectionRenderer.free();
-        this.depthMaskBlit.delete();
-        this.depthSetBlit.delete();
-        this.depthCopy.delete();
+        this.depthStencilSetup.delete();
         super.free0();
     }
 

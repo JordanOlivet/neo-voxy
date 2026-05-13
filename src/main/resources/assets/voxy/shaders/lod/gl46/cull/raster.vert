@@ -8,6 +8,7 @@
 
 #import <voxy:lod/section.glsl>
 #import <voxy:lod/gl46/bindings.glsl>
+#import <voxy:util/depthutils.glsl>
 
 flat out uint id;
 flat out uint value;
@@ -29,6 +30,10 @@ void main() {
 
     gl_Position = MVP * vec4(vec3(pos),1);
 
+    //Bring closer to camera (anti z-fight against vanilla terrain at boundary)
+    //Ported from origine voxy 12111 branch — without this LOD/vanilla seam is visible at RD edge
+    gl_Position.z += (CLOSER_SIGN*0.000001f) * gl_Position.w;
+
     //Write to the section id, to track temporal over time (litterally just need a single bit, 1 fking bit, but no)
     id = sid;
 
@@ -37,3 +42,7 @@ void main() {
     bool wasVisibleLastFrame = previous==(frameId-1);
     value = (frameId&0x7fffffffu)|(uint(wasVisibleLastFrame)<<31);//Encode if it was visible last frame
 }
+
+
+//Undefine depth stuff
+#import <voxy:util/depthutils.glsl>

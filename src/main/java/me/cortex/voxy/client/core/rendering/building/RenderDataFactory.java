@@ -1656,12 +1656,6 @@ public class RenderDataFactory {
 
     //section is already acquired and gets released by the parent
     public BuiltSection generateMesh(WorldSection section) {
-        //Ingestion gate: skip sections that haven't yet received at least one VoxelizedSection ingest
-        // in each of their 8 octants. Meshing a partially-ingested section produces sparse geometry
-        // that renders as visually-transparent chunks at LOD distance.
-        if (!section.isFullyIngested()) {
-            return BuiltSection.emptyWithChildren(section.key, section.getNonEmptyChildren());
-        }
 
         //TODO: FIXME: because of the exceptions that are thrown when aquiring modelId
         // this can result in the state of all block meshes and well _everything_ from being incorrect
