@@ -163,9 +163,15 @@ public class VoxyServer {
 
         try {
             boolean queued = instance.getIngestService().enqueueIngest(engine, levelChunk);
-            if (!queued && serverConfig.logIngestSkips) {
-                Logger.info("[VoxyIngest] enqueueIngest returned false at " + levelChunk.getPos() +
-                        " (no lighting yet or queue rejected) — chunk may never get a LOD until manual regen");
+            if (serverConfig.logIngestSkips) {
+                if (queued) {
+                    Logger.info("[VoxyIngest] ok at " + levelChunk.getPos() +
+                            " status=" + levelChunk.getPersistedStatus());
+                } else {
+                    Logger.info("[VoxyIngest] enqueueIngest returned false at " + levelChunk.getPos() +
+                            " status=" + levelChunk.getPersistedStatus() +
+                            " (no lighting yet or queue rejected) — chunk may never get a LOD until manual regen");
+                }
             }
         } catch (Exception e) {
             Logger.error("Failed to ingest server chunk at " + levelChunk.getPos(), e);

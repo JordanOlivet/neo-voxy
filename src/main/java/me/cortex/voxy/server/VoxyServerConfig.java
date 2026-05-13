@@ -66,6 +66,50 @@ public class VoxyServerConfig {
      */
     public boolean logIngestSkips = false;
 
+    /**
+     * Interval (seconds) for the auto-regen watchdog. Periodically iterates the
+     * chunks currently loaded server-side around each connected player and
+     * re-ingests any whose corresponding voxy section has no content in the
+     * engine. Recovers from {@code ChunkEvent.Load} skips (proto-chunk, missing
+     * lighting). Set to {@code 0} to disable. Default 30s.
+     */
+    public int autoRegenIntervalSeconds = 30;
+
+    /**
+     * Horizontal cap (vanilla chunks) on the auto-regen sweep around each player.
+     * Lower = cheaper but slower coverage; higher = catches missing chunks
+     * further away. Default 32 chunks. Capped to the server view-distance at
+     * runtime so it never tries to re-ingest unloaded chunks.
+     */
+    public int autoRegenRadiusChunks = 32;
+
+    /**
+     * When a player teleports or moves more than this many vanilla chunks in a
+     * single streaming tick, the per-player {@code lastSentVersion} cache is
+     * cleared so the new area gets fully re-streamed from scratch. Recovers from
+     * race conditions where the previous partial-section data on the client
+     * stayed stuck because the relevant server-side version bumps were dropped.
+     * Set to {@code 0} to disable. Default 8 chunks.
+     */
+    public int autoResyncOnJumpChunks = 8;
+
+    /**
+     * When {@code true}, log every section that the streamer skips because
+     * {@code lastSentVersion[key] >= section.version}. Useful to confirm whether
+     * a "missing LOD" symptom is caused by the version-bump path being missed
+     * server-side. Verbose — leave off in normal operation.
+     */
+    public boolean logVersionSkips = false;
+
+    /**
+     * Maximum number of dirty-key entries drained per player tick. Prevents the
+     * scheduler thread from blocking for hundreds of milliseconds when the
+     * queue spikes (e.g. Chunky pregen of thousands of sections), which would
+     * stall position tracking and false-trigger the auto-resync jump detector.
+     * Excess entries stay in the queue for the next tick. Default 4096.
+     */
+    public int dirtyDrainMaxPerTick = 4096;
+
     private transient Path configPath;
 
     public static VoxyServerConfig load(Path serverRoot) {
@@ -105,6 +149,11 @@ public class VoxyServerConfig {
             this.maxStreamingRadiusChunks = fresh.maxStreamingRadiusChunks;
             this.clientHintRadiusCapChunks = fresh.clientHintRadiusCapChunks;
             this.logIngestSkips = fresh.logIngestSkips;
+            this.autoRegenIntervalSeconds = fresh.autoRegenIntervalSeconds;
+            this.autoRegenRadiusChunks = fresh.autoRegenRadiusChunks;
+            this.autoResyncOnJumpChunks = fresh.autoResyncOnJumpChunks;
+            this.logVersionSkips = fresh.logVersionSkips;
+            this.dirtyDrainMaxPerTick = fresh.dirtyDrainMaxPerTick;
             this.perPlayerLimitKBps = fresh.perPlayerLimitKBps;
             this.globalLimitKBps = fresh.globalLimitKBps;
             this.serializeThreads = fresh.serializeThreads;

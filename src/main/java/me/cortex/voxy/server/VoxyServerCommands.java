@@ -97,7 +97,18 @@ public class VoxyServerCommands {
                 // player. Does NOT re-ingest chunks; pair with /voxyadmin regen if
                 // the engine itself is missing data.
                 .then(Commands.literal("resync")
-                        .executes(context -> resyncCurrentLevel(context.getSource())));
+                        .executes(context -> resyncCurrentLevel(context.getSource())))
+
+                // /voxyadmin diag [radiusChunks] - print per-section bucket counts
+                // for sections around the caller. Helps diagnose "I see a hole here,
+                // resync fixes it" cases by showing whether the streamer thinks the
+                // section is already up-to-date when it actually is not.
+                .then(Commands.literal("diag")
+                        .executes(context -> diagSnapshot(context.getSource(), 16))
+                        .then(Commands.argument("radiusChunks", IntegerArgumentType.integer(1, 256))
+                                .executes(context -> diagSnapshot(
+                                        context.getSource(),
+                                        IntegerArgumentType.getInteger(context, "radiusChunks")))));
 
         dispatcher.register(voxyCommand);
         Logger.info("Registered VoxyAdmin server commands");
@@ -342,6 +353,33 @@ public class VoxyServerCommands {
                 "Regen: " + qF + " chunks re-ingested, " + nF + " not currently loaded (within " +
                         radiusChunks + "-chunk radius)"), true);
         return qF;
+    }
+
+    /**
+     * Print a streaming-state snapshot for the caller's surrounding sections.
+     * Helps confirm whether the {@code lastSentVersion >= version} skip path is
+     * the cause of "this LOD is missing on my client but the server has it".
+     */
+    private static int diagSnapshot(CommandSourceStack source, int radiusChunks) {
+        if (!(source.getLevel() instanceof ServerLevel serverLevel)) {
+            source.sendFailure(Component.literal("This command must be run in a server world"));
+            return 0;
+        }
+        ServerPlayer player;
+        try {
+            player = source.getPlayerOrException();
+        } catch (Exception e) {
+            source.sendFailure(Component.literal("This command must be run by a player"));
+            return 0;
+        }
+        LodStreamingService service = VoxyServer.getStreamingService(serverLevel);
+        if (service == null) {
+            source.sendFailure(Component.literal("No streaming service for this level (no player has synced yet)"));
+            return 0;
+        }
+        String report = service.diagPlayer(player, radiusChunks);
+        source.sendSuccess(() -> Component.literal(report), true);
+        return 1;
     }
 
     /**

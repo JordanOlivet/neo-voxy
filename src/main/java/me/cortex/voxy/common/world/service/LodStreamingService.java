@@ -5,10 +5,12 @@ import me.cortex.voxy.common.network.*;
 import me.cortex.voxy.common.world.SectionSerializer;
 import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.common.world.WorldSection;
+import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.server.VoxyServer;
 import me.cortex.voxy.server.VoxyServerConfig;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.chunk.LevelChunk;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -109,11 +111,122 @@ public class LodStreamingService implements AutoCloseable {
         };
 
         installDirtyCallback();
+        scheduleAutoRegen();
 
         Logger.info("LodStreamingService initialized [" + level.dimension().location() +
                 "] workers=" + workers + " radius=" + config.maxStreamingRadiusChunks +
                 "ch (=" + config.getMaxStreamingRadiusSections() + "vs)" +
-                " ySections=[" + minSectionY + ".." + maxSectionYExclusive + ")");
+                " ySections=[" + minSectionY + ".." + maxSectionYExclusive + ")" +
+                " autoRegen=" + config.autoRegenIntervalSeconds + "s/" +
+                config.autoRegenRadiusChunks + "ch");
+    }
+
+    private void scheduleAutoRegen() {
+        if (config.autoRegenIntervalSeconds <= 0) {
+            return;
+        }
+        scheduler.scheduleAtFixedRate(
+                this::autoRegenSweep,
+                config.autoRegenIntervalSeconds,
+                config.autoRegenIntervalSeconds,
+                TimeUnit.SECONDS);
+    }
+
+    /**
+     * Periodic watchdog: walk every chunk currently loaded on the server around
+     * each connected player and re-enqueue an ingest for the ones whose
+     * corresponding voxy section is empty in the engine.
+     * <p>
+     * This is the recovery path for {@code ChunkEvent.Load} events Voxy silently
+     * dropped (proto-chunk, lighting not propagated, ingest queue overflow, ...)
+     * without forcing the player to run {@code /voxyadmin regen} by hand.
+     */
+    private void autoRegenSweep() {
+        if (!isActive.get() || playerStates.isEmpty()) {
+            return;
+        }
+        var instance = VoxyCommon.getInstance();
+        if (instance == null) {
+            return;
+        }
+        // Bound the sweep to the server view distance — getChunkNow only returns
+        // non-null for chunks the server actively keeps loaded, so going wider is
+        // harmless but wastes a few thousand HashMap lookups per tick.
+        int viewDistanceChunks;
+        try {
+            viewDistanceChunks = level.getServer().getPlayerList().getViewDistance();
+        } catch (Throwable t) {
+            viewDistanceChunks = 16;
+        }
+        int radiusChunks = Math.max(1, Math.min(config.autoRegenRadiusChunks, viewDistanceChunks + 4));
+
+        int totalRe = 0;
+        var chunkSource = level.getChunkSource();
+        for (PlayerStreamingState state : playerStates.values()) {
+            ServerPlayer p = state.player;
+            if (p == null || !p.isAlive() || p.connection == null) {
+                continue;
+            }
+            int pcx = p.getBlockX() >> 4;
+            int pcz = p.getBlockZ() >> 4;
+            int reForPlayer = 0;
+            for (int dx = -radiusChunks; dx <= radiusChunks; dx++) {
+                for (int dz = -radiusChunks; dz <= radiusChunks; dz++) {
+                    int cx = pcx + dx;
+                    int cz = pcz + dz;
+                    LevelChunk chunk = chunkSource.getChunkNow(cx, cz);
+                    if (chunk == null) {
+                        continue;
+                    }
+                    if (hasAnyContentForChunk(cx, cz)) {
+                        continue;
+                    }
+                    try {
+                        if (instance.getIngestService().enqueueIngest(worldEngine, chunk)) {
+                            reForPlayer++;
+                        }
+                    } catch (Exception e) {
+                        Logger.error("autoRegen failed at " + chunk.getPos(), e);
+                    }
+                }
+            }
+            if (reForPlayer > 0) {
+                Logger.info("[VoxyAutoRegen] " + p.getName().getString() + ": re-ingested " +
+                        reForPlayer + " loaded chunk(s) missing LOD (radius " + radiusChunks + "ch)");
+            }
+            totalRe += reForPlayer;
+        }
+        if (totalRe > 0) {
+            Logger.info("[VoxyAutoRegen] sweep total: " + totalRe + " chunks re-ingested across " +
+                    playerStates.size() + " player(s)");
+        }
+    }
+
+    /**
+     * Check whether the engine has any non-empty LOD content for the vanilla chunk
+     * at {@code (cx, cz)}. A chunk is 16 blocks wide; voxy sections are 32 blocks,
+     * so each chunk maps onto a single voxy section column at {@code (cx>>1, cz>>1)}.
+     * We probe LOD-0 sections across the dimension Y range and exit early on the
+     * first non-empty hit to keep the per-chunk cost down.
+     */
+    private boolean hasAnyContentForChunk(int cx, int cz) {
+        int vsx = cx >> 1;
+        int vsz = cz >> 1;
+        for (int vy = minSectionY; vy < maxSectionYExclusive; vy++) {
+            long key = WorldEngine.getWorldSectionId(0, vsx, vy, vsz);
+            WorldSection s = worldEngine.acquireIfExists(key);
+            if (s == null) {
+                continue;
+            }
+            try {
+                if (s.getNonEmptyBlockCount() > 0) {
+                    return true;
+                }
+            } finally {
+                s.release();
+            }
+        }
+        return false;
     }
 
     private void installDirtyCallback() {
@@ -145,8 +258,17 @@ public class LodStreamingService implements AutoCloseable {
             if (recentlyDirtyKeys.isEmpty()) {
                 return Collections.emptyList();
             }
-            List<Long> out = new ArrayList<>(recentlyDirtyKeys);
-            recentlyDirtyKeys.clear();
+            int cap = Math.max(1, config.dirtyDrainMaxPerTick);
+            int take = Math.min(cap, recentlyDirtyKeys.size());
+            if (take >= recentlyDirtyKeys.size()) {
+                List<Long> out = new ArrayList<>(recentlyDirtyKeys);
+                recentlyDirtyKeys.clear();
+                return out;
+            }
+            List<Long> out = new ArrayList<>(take);
+            for (int i = 0; i < take; i++) {
+                out.add(recentlyDirtyKeys.pollFirst());
+            }
             return out;
         }
     }
@@ -241,10 +363,61 @@ public class LodStreamingService implements AutoCloseable {
             int px = player.getBlockX() >> 5;
             int pz = player.getBlockZ() >> 5;
             if (px != state.lastPlayerSectionX || pz != state.lastPlayerSectionZ) {
+                // Detect teleport / long-distance jump. The client's section data for
+                // the new area is almost certainly partial because the server-side
+                // load + ingest is still in flight, and we cannot rely on the
+                // per-section version-bump path catching every late octant ingest.
+                // Wiping {@code lastSentVersion} forces a full re-stream of in-range
+                // sections, which is what {@code /voxyadmin resync} does — we just
+                // automate it on the obvious "I teleported" trigger.
+                //
+                // Guard against false positives when the scheduler thread itself was
+                // blocked (e.g. processing a huge dirty drain): a stalled tick lets
+                // the player accumulate normal movement, which looks like a jump on
+                // resume. Only treat the jump as real if the wall-clock interval
+                // since the previous tick is close to the configured tick period.
+                int jumpThresholdSections = Math.max(1, config.autoResyncOnJumpChunks / 2);
+                long now = System.nanoTime();
+                long expectedTickPeriodMs = Math.max(20L, (long) (1000.0 / Math.max(1.0,
+                        state.inMaintenance ? config.maintenanceTickHz : config.activeTickHz)));
+                long sinceLastTickMs = state.lastTickNanos == 0L
+                        ? 0L
+                        : (now - state.lastTickNanos) / 1_000_000L;
+                boolean schedulerStalled = sinceLastTickMs > expectedTickPeriodMs * 4L;
+                state.lastTickNanos = now;
+
+                if (config.autoResyncOnJumpChunks > 0
+                        && !schedulerStalled
+                        && state.lastPlayerSectionX != Integer.MIN_VALUE
+                        && (Math.abs(px - state.lastPlayerSectionX) > jumpThresholdSections
+                                || Math.abs(pz - state.lastPlayerSectionZ) > jumpThresholdSections)) {
+                    int wiped = state.lastSentVersion.size();
+                    state.lastSentVersion.clear();
+                    state.clientCacheFilter = BloomFilter.forExpectedElements(10000);
+                    // Don't clear serializedCache — it is keyed by (section key, version)
+                    // and the data behind each entry is still valid for the section's
+                    // current version. Re-using the cache here saves us from
+                    // re-serializing every section the player is about to receive.
+                    Logger.info("[VoxyStream] " + player.getName().getString() +
+                            " jumped " + Math.max(Math.abs(px - state.lastPlayerSectionX),
+                                    Math.abs(pz - state.lastPlayerSectionZ)) +
+                            " sections — auto-resync (cleared " + wiped + " lastSent entries)");
+                } else if (schedulerStalled
+                        && state.lastPlayerSectionX != Integer.MIN_VALUE
+                        && (Math.abs(px - state.lastPlayerSectionX) > jumpThresholdSections
+                                || Math.abs(pz - state.lastPlayerSectionZ) > jumpThresholdSections)) {
+                    Logger.warn("[VoxyStream] scheduler stalled " + sinceLastTickMs +
+                            "ms (expected " + expectedTickPeriodMs + "ms), skipping auto-resync " +
+                            "even though player section delta is " +
+                            Math.max(Math.abs(px - state.lastPlayerSectionX),
+                                    Math.abs(pz - state.lastPlayerSectionZ)) + " sections");
+                }
                 state.currentRing = 0;
                 state.consecutiveEmptyRings = 0;
                 state.lastPlayerSectionX = px;
                 state.lastPlayerSectionZ = pz;
+            } else {
+                state.lastTickNanos = System.nanoTime();
             }
 
             int radius = effectiveRadius(state);
@@ -361,7 +534,9 @@ public class LodStreamingService implements AutoCloseable {
     /**
      * Queue a section for streaming if (a) it exists, (b) has content, and
      * (c) its {@link WorldSection#getVersion()} is newer than the last copy we
-     * sent to this player. Returns {@code true} iff the section was queued.
+     * sent to this player. Returns {@code true} iff the section was accepted
+     * for streaming (the actual serialize + sender enqueue happens on a worker
+     * thread so the scheduler tick does not block on CPU-heavy work).
      */
     private boolean maybeQueueSection(PlayerStreamingState state, long key) {
         WorldSection section = worldEngine.acquireIfExists(key);
@@ -383,21 +558,44 @@ public class LodStreamingService implements AutoCloseable {
             long version = section.getVersion();
             Long lastSent = state.lastSentVersion.get(key);
             if (lastSent != null && lastSent >= version) {
+                if (config.logVersionSkips) {
+                    Logger.info("[VoxyVersion] skip key=" + WorldEngine.pprintPos(key) +
+                            " lastSent=" + lastSent + " current=" + version +
+                            " nonEmptyBlocks=" + section.getNonEmptyBlockCount() +
+                            " childMask=0x" + Integer.toHexString(section.getNonEmptyChildren() & 0xFF) +
+                            " octantMask=0x" + Integer.toHexString(section.getIngestedOctantMask() & 0xFF));
+                }
                 return false;
             }
 
-            // Try the shared cache first.
-            byte[] data = lookupOrSerialize(section, version);
-            if (data == null) {
-                return false;
-            }
-
-            // Hand off to ChunkedLodSender (bandwidth-controlled).
-            state.sender.queueSection(data, (int) key);
+            // Commit the "sent" markers eagerly on the scheduler thread so a
+            // subsequent drain doesn't enqueue the same section a second time
+            // while the worker is still serializing it.
             state.lastSentVersion.put(key, version);
             state.clientCacheFilter.add(key);
+
+            // Hand off the CPU-heavy work to the worker pool. The section ref
+            // count must be kept while the worker reads section data, so we
+            // acquire once more and let the worker release.
+            section.acquire();
+            final WorldSection capturedSection = section;
+            serializeExecutor.execute(() -> {
+                try {
+                    byte[] data = lookupOrSerialize(capturedSection, version);
+                    if (data != null) {
+                        state.sender.queueSection(data, (int) key);
+                    }
+                } catch (Throwable t) {
+                    Logger.error("async serialize failed for " + WorldEngine.pprintPos(key), t);
+                } finally {
+                    capturedSection.release();
+                }
+            });
             return true;
         } finally {
+            // Always release the ref obtained by acquireIfExists. If we forked
+            // serialization, the worker holds its own extra ref (taken above)
+            // and will release that when it is done.
             section.release();
         }
     }
@@ -490,11 +688,10 @@ public class LodStreamingService implements AutoCloseable {
         state.lastPlayerSectionX = Integer.MIN_VALUE;
         state.lastPlayerSectionZ = Integer.MIN_VALUE;
         state.clientCacheFilter = BloomFilter.forExpectedElements(10000);
-        // Also drop any cached serialized bytes — they may be stale relative to the
-        // engine's current state after a regen.
-        synchronized (cacheLock) {
-            serializedCache.clear();
-        }
+        // Keep serializedCache — its keys carry the section version, so any entry
+        // still valid for the live section will skip re-serialization on resend.
+        // {@code /voxyadmin regen} bumps the engine versions through markDirty, which
+        // invalidates the relevant cache entries naturally.
         long periodMs = Math.max(20L, (long) (1000.0 / Math.max(1.0, config.activeTickHz)));
         if (state.scheduledHandle != null) {
             state.scheduledHandle.cancel(false);
@@ -502,6 +699,76 @@ public class LodStreamingService implements AutoCloseable {
         state.scheduledHandle = scheduler.scheduleAtFixedRate(
                 () -> tickPlayer(state), 0L, periodMs, TimeUnit.MILLISECONDS);
         return previouslySent;
+    }
+
+    /**
+     * Diagnostic snapshot: walk every LOD-0 voxy section within a {@code radius}
+     * (in vanilla chunks) around the player and bucket-count the streaming state.
+     * Returns a one-liner suitable for sending back as a command reply.
+     */
+    public String diagPlayer(ServerPlayer player, int radiusChunks) {
+        PlayerStreamingState state = playerStates.get(player.getUUID());
+        if (state == null) {
+            return "no streaming state for " + player.getName().getString();
+        }
+        int pcx = player.getBlockX() >> 4;
+        int pcz = player.getBlockZ() >> 4;
+        int rc = Math.max(1, radiusChunks);
+        int totalEngineHasContent = 0;
+        int totalNeverSent = 0;     // section has content, never sent → drain should pick up
+        int totalNeedsResend = 0;   // lastSent < current version → drain should pick up
+        int totalUpToDate = 0;      // lastSent >= current version → already sent
+        int totalEmpty = 0;         // section exists in engine but blockCount=0
+        int totalMissing = 0;       // section not in engine
+
+        java.util.Set<Long> seen = new java.util.HashSet<>();
+        for (int cx = pcx - rc; cx <= pcx + rc; cx++) {
+            for (int cz = pcz - rc; cz <= pcz + rc; cz++) {
+                int vsx = cx >> 1;
+                int vsz = cz >> 1;
+                for (int vy = minSectionY; vy < maxSectionYExclusive; vy++) {
+                    long key = WorldEngine.getWorldSectionId(0, vsx, vy, vsz);
+                    if (!seen.add(key)) {
+                        continue;
+                    }
+                    WorldSection s = worldEngine.acquireIfExists(key);
+                    if (s == null) {
+                        totalMissing++;
+                        continue;
+                    }
+                    try {
+                        if (s.getNonEmptyBlockCount() == 0) {
+                            totalEmpty++;
+                            continue;
+                        }
+                        totalEngineHasContent++;
+                        long version = s.getVersion();
+                        Long lastSent = state.lastSentVersion.get(key);
+                        if (lastSent == null) {
+                            totalNeverSent++;
+                        } else if (lastSent < version) {
+                            totalNeedsResend++;
+                        } else {
+                            totalUpToDate++;
+                        }
+                    } finally {
+                        s.release();
+                    }
+                }
+            }
+        }
+        return player.getName().getString() +
+                " @ chunk(" + pcx + "," + pcz + ") radius=" + rc + "ch ⇒ " +
+                "engineHasContent=" + totalEngineHasContent +
+                " neverSent=" + totalNeverSent +
+                " needsResend=" + totalNeedsResend +
+                " upToDate=" + totalUpToDate +
+                " engineEmpty=" + totalEmpty +
+                " engineMissing=" + totalMissing +
+                " lastSentMapSize=" + state.lastSentVersion.size() +
+                " dirtyQueueSize=" + recentlyDirtyKeys.size() +
+                " ring=" + state.currentRing + "/" + effectiveRadius(state) +
+                " maintenance=" + state.inMaintenance;
     }
 
     /**
@@ -606,6 +873,7 @@ public class LodStreamingService implements AutoCloseable {
 
         int lastPlayerSectionX = Integer.MIN_VALUE;
         int lastPlayerSectionZ = Integer.MIN_VALUE;
+        long lastTickNanos = 0L;
 
         ScheduledFuture<?> scheduledHandle;
 

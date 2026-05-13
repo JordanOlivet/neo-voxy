@@ -320,6 +320,17 @@ public class LodReceptionService implements AutoCloseable {
                 // Update non-empty children
                 section._unsafeSetNonEmptyChildren(sectionData.nonEmptyChildren);
 
+                // Render gates mesh generation behind {@code isFullyIngested()} (octant
+                // mask == 0xFF). On the server side, sections at the boundary of vanilla
+                // view-distance only have some of their 8 octants ingested because the
+                // missing chunks aren't currently loaded, so their octant mask stays
+                // partial (0xaa / 0xcc / 0x33 / ...) — that triggered visible holes in
+                // the rendered LOD anywhere the player's view-distance "circle" cut
+                // across a 32-block voxy section column. Treat any section we receive
+                // over the network as authoritative: the server already had whatever
+                // data it had, no point waiting on octants that may never come.
+                section._unsafeSetFullyIngested();
+
                 // Server-streamed sections never went through WorldUpdater.insertUpdate
                 // on the client, so the render system has no idea that the new section's
                 // 6 neighbors need their boundary meshes re-built. Without this the

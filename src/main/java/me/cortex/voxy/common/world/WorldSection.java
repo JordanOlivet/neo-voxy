@@ -45,6 +45,17 @@ public final class WorldSection {
     private static final AtomicInteger ARRAY_REUSE_CACHE_COUNT = new AtomicInteger(0);
     private static final ConcurrentLinkedDeque<long[]> ARRAY_REUSE_CACHE = new ConcurrentLinkedDeque<>();
 
+    // Process-wide monotonic counter used to seed each {@link WorldSection#version}
+    // so a section reloaded from disk (or popped from the LRU and reused) always
+    // gets a version that is strictly greater than any value it may have had in a
+    // previous incarnation. The streaming layer compares per-player {@code
+    // lastSentVersion} against this counter to decide whether a section has
+    // changed since the last broadcast; without a unique seed per allocation, a
+    // disk-loaded section would start at {@code 0} and look "older than what we
+    // already sent" to the streamer, which silently dropped the resend.
+    private static final java.util.concurrent.atomic.AtomicLong GLOBAL_VERSION_SEED =
+            new java.util.concurrent.atomic.AtomicLong(1L);
+
 
     public final int lvl;
     public final int x;
@@ -67,9 +78,11 @@ public final class WorldSection {
     final ActiveSectionTracker tracker;
     volatile boolean inSaveQueue;
     volatile boolean isDirty;
-    // Monotonic counter bumped on every markDirty. Streaming uses this to detect that
-    // a section has changed since the last time it was sent to a given client, so the
-    // server can resend an updated copy without tracking per-(section,player) state.
+    // Monotonic counter, seeded from {@link #GLOBAL_VERSION_SEED} on construction
+    // and {@link #primeForReuse()} and bumped by every {@link WorldEngine#markDirty}
+    // call. Streaming uses this to detect that a section has changed since the
+    // last time it was sent to a given client, so the server can resend an updated
+    // copy without tracking per-(section,player) state.
     @SuppressWarnings("unused")
     volatile long version = 0;
 
@@ -91,10 +104,17 @@ public final class WorldSection {
         } else {
             ARRAY_REUSE_CACHE_COUNT.decrementAndGet();
         }
+        // Seed version from the process-wide counter so disk-loaded / freshly
+        // allocated sections never look "older than already sent" to the streamer.
+        this.version = GLOBAL_VERSION_SEED.incrementAndGet();
     }
 
     void primeForReuse() {
         ATOMIC_STATE_HANDLE.set(this, 1);
+        // Section was pulled out of the LRU secondary cache and is about to be
+        // populated again — give it a fresh version so the streamer treats it as
+        // a new payload candidate for every client.
+        VERSION_HANDLE.set(this, GLOBAL_VERSION_SEED.incrementAndGet());
     }
 
     public long[] _unsafeGetRawDataArray() {

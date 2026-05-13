@@ -10,3 +10,5 @@ logs
 build.bat
 server_test
 .vscode
+_build-and-deploy.bat
+_run-test-server.bat.lnk
