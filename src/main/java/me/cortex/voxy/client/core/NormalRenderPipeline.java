@@ -3,22 +3,18 @@ package me.cortex.voxy.client.core;
 import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.gl.GlFramebuffer;
 import me.cortex.voxy.client.core.gl.GlTexture;
-import me.cortex.voxy.client.core.gl.shader.Shader;
-import me.cortex.voxy.client.core.gl.shader.ShaderType;
 import me.cortex.voxy.client.core.rendering.Viewport;
 import me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager;
 import me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser;
 import me.cortex.voxy.client.core.rendering.hierachical.NodeCleaner;
 import me.cortex.voxy.client.core.rendering.post.FullscreenBlit;
 import me.cortex.voxy.client.core.rendering.util.DepthFramebuffer;
-import net.minecraft.client.Minecraft;
 import org.joml.Matrix4f;
 import org.lwjgl.system.MemoryStack;
 
+import java.util.List;
 import java.util.function.BooleanSupplier;
 
-import static org.lwjgl.opengl.ARBComputeShader.glDispatchCompute;
-import static org.lwjgl.opengl.ARBShaderImageLoadStore.glBindImageTexture;
 import static org.lwjgl.opengl.GL11.GL_BLEND;
 import static org.lwjgl.opengl.GL11.GL_ONE;
 import static org.lwjgl.opengl.GL11.GL_ONE_MINUS_SRC_ALPHA;
@@ -27,7 +23,7 @@ import static org.lwjgl.opengl.GL11.glEnable;
 import static org.lwjgl.opengl.GL11C.GL_NEAREST;
 import static org.lwjgl.opengl.GL11C.GL_RGBA8;
 import static org.lwjgl.opengl.GL14.glBlendFuncSeparate;
-import static org.lwjgl.opengl.GL15.GL_READ_WRITE;
+import static org.lwjgl.opengl.GL20C.nglUniformMatrix4fv;
 import static org.lwjgl.opengl.GL30C.*;
 import static org.lwjgl.opengl.GL43.GL_DEPTH_STENCIL_TEXTURE_MODE;
 import static org.lwjgl.opengl.GL45C.glBindTextureUnit;
@@ -41,9 +37,11 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
 
     private final FullscreenBlit finalBlit;
 
-    private final Shader ssaoCompute = Shader.make()
-            .add(ShaderType.COMPUTE, "voxy:post/ssao.comp")
-            .compile();
+    private final SSAO ssao = SSAO.createSSAO(VoxyConfig.CONFIG.ssaoMode);
+
+    // Captured during setup() so postOpaquePreTranslucent can pass it to SSAO (BETTER mode
+    // samples the source FB's depth attachment for vanilla coverage).
+    private int currentSourceFB;
 
     protected NormalRenderPipeline(AsyncNodeManager nodeManager, NodeCleaner nodeCleaner, HierarchicalOcclusionTraverser traversal, BooleanSupplier frexSupplier) {
         super(nodeManager, nodeCleaner, traversal, frexSupplier);
@@ -53,6 +51,7 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
 
     @Override
     protected int setup(Viewport<?> viewport, int sourceFB, int srcWidth, int srcHeight) {
+        this.currentSourceFB = sourceFB;
         if (this.colourTex == null || this.colourTex.getHeight() != viewport.height || this.colourTex.getWidth() != viewport.width) {
             if (this.colourTex != null) {
                 this.colourTex.free();
@@ -81,22 +80,7 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
 
     @Override
     protected void postOpaquePreTranslucent(Viewport<?> viewport) {
-        this.ssaoCompute.bind();
-        try (var stack = MemoryStack.stackPush()) {
-            long ptr = stack.nmalloc(4*4*4);
-            viewport.MVP.getToAddress(ptr);
-            nglUniformMatrix4fv(3, 1, false, ptr);//MVP
-            viewport.MVP.invert(new Matrix4f()).getToAddress(ptr);
-            nglUniformMatrix4fv(4, 1, false, ptr);//invMVP
-        }
-
-
-        glBindImageTexture(0, this.colourSSAOTex.id, 0, false,0, GL_READ_WRITE, GL_RGBA8);
-        glBindTextureUnit(1, this.fb.getDepthTex().id);
-        glBindTextureUnit(2, this.colourTex.id);
-
-        glDispatchCompute((viewport.width+31)/32, (viewport.height+31)/32, 1);
-
+        this.ssao.computeSSAO(viewport, this.colourSSAOTex, this.colourTex, this.fb.getDepthTex(), this.currentSourceFB);
         glBindFramebuffer(GL_FRAMEBUFFER, this.fbSSAO.id);
     }
 
@@ -159,9 +143,15 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
     }
 
     @Override
+    public void addDebug(List<String> debug) {
+        this.ssao.addDebugInfo(debug);
+        super.addDebug(debug);
+    }
+
+    @Override
     public void free() {
         this.finalBlit.delete();
-        this.ssaoCompute.free();
+        this.ssao.free();
         this.fb.free();
         this.fbSSAO.free();
         if (this.colourTex != null) {

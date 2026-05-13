@@ -3,6 +3,7 @@ package me.cortex.voxy.client.config;
 import com.google.gson.FieldNamingPolicy;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import me.cortex.voxy.client.core.SSAO;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.cpu.CpuLayout;
 import me.cortex.voxy.commonImpl.VoxyCommon;
@@ -34,6 +35,7 @@ public class VoxyConfig implements OptionStorage<VoxyConfig> {
     public boolean renderStatistics = false;
     public boolean dontUseSodiumBuilderThreads = false;
     public boolean debugDumpOnScreenshot = false;
+    public SSAO.SSAOMode ssaoMode = SSAO.SSAOMode.AUTO;
 
     private static VoxyConfig loadOrCreate() {
         if (VoxyCommon.isAvailable()) {

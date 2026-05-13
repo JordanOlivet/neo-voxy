@@ -27,6 +27,7 @@ public class Capabilities {
     public final boolean subgroup;
     public final boolean sparseBuffer;
     public final boolean isNvidia;
+    public final boolean isAmd;
     public final boolean nvBarryCoords;
 
     public Capabilities() {
@@ -64,8 +65,10 @@ public class Capabilities {
         this.ssboMaxSize = glGetInteger64(GL_MAX_SHADER_STORAGE_BLOCK_SIZE);
 
         this.isMesa = glGetString(GL_VERSION).toLowerCase().contains("mesa");
-        this.isIntel = glGetString(GL_VENDOR).toLowerCase().contains("intel");
-        this.isNvidia = glGetString(GL_VENDOR).toLowerCase().contains("nvidia");
+        String vendor = glGetString(GL_VENDOR).toLowerCase();
+        this.isIntel = vendor.contains("intel");
+        this.isNvidia = vendor.contains("nvidia");
+        this.isAmd = vendor.contains("amd") || vendor.contains("ati") || vendor.contains("radeon") || vendor.contains("advanced micro devices");
 
         if (this.canQueryGpuMemory) {
             this.totalDedicatedMemory = glGetInteger64(GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX)*1024;//Since its in Kb
