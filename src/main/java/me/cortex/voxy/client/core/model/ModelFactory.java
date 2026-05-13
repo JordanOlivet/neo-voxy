@@ -27,6 +27,7 @@ import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.BlockAndTintGetter;
+import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ColorResolver;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.biome.Biome;
@@ -669,6 +670,9 @@ public class ModelFactory {
 
         metadata |= fullyOpaque ? (1L << (48 + 6)) : 0;
 
+        //block emission (4 bits at offset 55)
+        metadata |= ((long)getBlockLightEmission(blockState)) << (48 + 7);
+
         boolean canBeCorrectlyRendered = true;// This represents if a model can be correctly (perfectly) represented
         // i.e. no gaps
 
@@ -965,6 +969,40 @@ public class ModelFactory {
             }
         }, BlockPos.ZERO, 0);
         return biomeDependent[0];
+    }
+
+    private static int getBlockLightEmission(BlockState state) {
+        boolean isEmissive = state.emissiveRendering(new BlockGetter() {
+            @Nullable
+            @Override
+            public BlockEntity getBlockEntity(BlockPos pos) {
+                return null;
+            }
+
+            @Override
+            public BlockState getBlockState(BlockPos pos) {
+                return state;
+            }
+
+            @Override
+            public FluidState getFluidState(BlockPos pos) {
+                return state.getFluidState();
+            }
+
+            @Override
+            public int getHeight() {
+                return 0;
+            }
+
+            @Override
+            public int getMinBuildHeight() {
+                return 0;
+            }
+        }, BlockPos.ZERO);
+        if (isEmissive) {
+            return 15;//full bright
+        }
+        return state.getLightEmission();
     }
 
     private static float[] computeModelDepth(ColourDepthTextureData[] textures, int checkMode) {
