@@ -1534,6 +1534,98 @@ public class NodeManager {
                 + (this.singleRequests.count() + this.childRequests.count()));
     }
 
+    public String dumpNodeHierarchy(int blockX, int blockY, int blockZ) {
+        StringBuilder sb = new StringBuilder("TREE ");
+        for (int lvl = 4; lvl >= 0; lvl--) {
+            int shift = 5 + lvl;
+            int sx = blockX >> shift;
+            int sy = blockY >> shift;
+            int sz = blockZ >> shift;
+            long pos = WorldEngine.getWorldSectionId(lvl, sx, sy, sz);
+            int nodeId = this.activeSectionMap.get(pos);
+            if (lvl < 4) sb.append(" | ");
+            sb.append(lvl).append("@[").append(sx).append(",").append(sy).append(",").append(sz).append("]:");
+            appendNodeState(sb, nodeId);
+        }
+        return sb.toString();
+    }
+
+    public String dumpGapTree(int blockX, int blockY, int blockZ) {
+        int cx = blockX >> 5;
+        int cy = blockY >> 5;
+        int cz = blockZ >> 5;
+        for (int dz = -2; dz <= 2; dz++) {
+            for (int dx = -2; dx <= 2; dx++) {
+                long pos = WorldEngine.getWorldSectionId(0, cx + dx, cy, cz + dz);
+                if (this.activeSectionMap.get(pos) == -1) {
+                    int gapBlockX = (cx + dx) << 5;
+                    int gapBlockY = (cy) << 5;
+                    int gapBlockZ = (cz + dz) << 5;
+                    return "GAP-TREE (" + (cx+dx) + "," + cy + "," + (cz+dz) + ") " +
+                            dumpNodeHierarchy(gapBlockX, gapBlockY, gapBlockZ);
+                }
+            }
+        }
+        return "GAP-TREE none missing";
+    }
+
+    public String dumpL0Grid(int blockX, int blockY, int blockZ) {
+        int cx = blockX >> 5;
+        int cy = blockY >> 5;
+        int cz = blockZ >> 5;
+        StringBuilder sb = new StringBuilder("L0 y=").append(cy).append(" ");
+        for (int dz = -2; dz <= 2; dz++) {
+            for (int dx = -2; dx <= 2; dx++) {
+                long pos = WorldEngine.getWorldSectionId(0, cx + dx, cy, cz + dz);
+                int nodeId = this.activeSectionMap.get(pos);
+                if (nodeId == -1) {
+                    sb.append(".");
+                } else {
+                    int type = nodeId & NODE_TYPE_MSK;
+                    int id = nodeId & NODE_ID_MSK;
+                    if (type == NODE_TYPE_LEAF) {
+                        int geo = this.nodeData.getNodeGeometry(id);
+                        sb.append(geo == NULL_GEOMETRY_ID ? "n" : geo == EMPTY_GEOMETRY_ID ? "e" : "G");
+                    } else if (type == NODE_TYPE_INNER) {
+                        sb.append("I");
+                    } else {
+                        sb.append("R");
+                    }
+                }
+            }
+            if (dz < 2) sb.append("/");
+        }
+        return sb.toString();
+    }
+
+    private void appendNodeState(StringBuilder sb, int nodeId) {
+        if (nodeId == -1) {
+            sb.append("MISS");
+        } else {
+            int type = nodeId & NODE_TYPE_MSK;
+            int id = nodeId & NODE_ID_MSK;
+            if (type == NODE_TYPE_LEAF) {
+                int geo = this.nodeData.getNodeGeometry(id);
+                byte ce = this.nodeData.getNodeChildExistence(id);
+                boolean reqInFlight = this.nodeData.isNodeRequestInFlight(id);
+                sb.append("LEAF g=").append(geo == NULL_GEOMETRY_ID ? "NULL" : geo == EMPTY_GEOMETRY_ID ? "EMPTY" : geo);
+                sb.append(" ce=0x").append(Integer.toHexString(Byte.toUnsignedInt(ce)));
+                if (reqInFlight) sb.append(" REQ!");
+            } else if (type == NODE_TYPE_INNER) {
+                int childPtr = this.nodeData.getChildPtr(id);
+                int childCount = this.nodeData.getChildPtrCount(id);
+                int geo = this.nodeData.getNodeGeometry(id);
+                byte ce = this.nodeData.getNodeChildExistence(id);
+                sb.append("INNER cp=").append(childPtr).append(" cc=").append(childCount);
+                sb.append(" ce=0x").append(Integer.toHexString(Byte.toUnsignedInt(ce)));
+                sb.append(" g=").append(geo == NULL_GEOMETRY_ID ? "NULL" : geo == EMPTY_GEOMETRY_ID ? "EMPTY" : geo);
+            } else if (type == NODE_TYPE_REQUEST) {
+                int reqType = nodeId & REQUEST_TYPE_MSK;
+                sb.append(reqType == REQUEST_TYPE_SINGLE ? "SREQ" : "CREQ");
+            }
+        }
+    }
+
     public int getCurrentMaxNodeId() {
         return this.nodeData.getEndNodeId();
     }

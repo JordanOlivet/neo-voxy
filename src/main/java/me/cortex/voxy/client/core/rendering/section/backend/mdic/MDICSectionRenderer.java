@@ -112,6 +112,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         var builder = Shader.make()
                 .defineIf("TAA_PATCH", taa != null)
                 .defineIf("DEBUG_RENDER", false)
+                //.defineIf("GAP_DEBUG_RENDER", true)
 
                 // .defineIf("USE_NV_BARRY", Capabilities.INSTANCE.nvBarryCoords)
 

@@ -13,6 +13,7 @@ layout(binding = 0) uniform sampler2D blockModelAtlas;
 layout(binding = 2) uniform sampler2D depthTex;
 
 //#define DEBUG_RENDER
+//#define GAP_DEBUG_RENDER
 
 //TODO: need to fix when merged quads have discardAlpha set to false but they span multiple tiles
 // however they are not a full block
@@ -20,6 +21,9 @@ layout(binding = 2) uniform sampler2D depthTex;
 layout(location = 0) in flat uvec4 interData;
 #ifndef USE_NV_BARRY
 layout(location = 1) in vec2 uv;
+#endif
+#ifdef GAP_DEBUG_RENDER
+layout(location = 6) in float fragDist;
 #endif
 
 #ifdef DEBUG_RENDER
@@ -180,6 +184,14 @@ void main() {
     #ifndef PATCHED_SHADER
     colour = computeColour(texPos, colour);
     outColour = colour;
+
+    #ifdef GAP_DEBUG_RENDER
+    // Green=close(<64), Yellow=medium(64-192), Red=far(>192)
+    float t = clamp(fragDist / 192.0, 0.0, 1.0);
+    vec3 dbgCol = mix(vec3(0,1,0), vec3(1,1,0), clamp(t*2.0, 0.0, 1.0));
+    dbgCol = mix(dbgCol, vec3(1,0,0), clamp(t*2.0-1.0, 0.0, 1.0));
+    outColour = vec4(dbgCol, 1.0);
+    #endif
 
     #ifdef DEBUG_RENDER
     uint hash = quadDebug*1231421+123141;

@@ -16,6 +16,9 @@
 
 layout(location = 0) out flat uvec4 interData;
 layout(location = 1) out vec2 uv;
+#ifdef GAP_DEBUG_RENDER
+layout(location = 6) out float fragDist;
+#endif
 
 uint packVec4(vec4 vec) {
     uvec4 vec_=uvec4(vec*255)<<uvec4(24,16,8,0);
@@ -117,6 +120,10 @@ void main() {
     vec3 origin = vec3(((extractLoDPosition(encPos)<<lodLevel) - baseSectionPos)<<5);
     vec3 pointPos = (cornerPos+swizzelDataAxis(face>>1,vec3(cQuadSize,0)))*(1<<lodLevel)+origin;
     gl_Position = MVP*vec4(pointPos, 1.0);
+
+    #ifdef GAP_DEBUG_RENDER
+    fragDist = length(pointPos.xz);
+    #endif
 
     //Apply taa shift
     gl_Position.xy += taaShift()*gl_Position.w;

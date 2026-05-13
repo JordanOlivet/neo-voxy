@@ -797,6 +797,18 @@ public class AsyncNodeManager {
         // this.geometryUpdateQueue.size()+"/"+this.removeBatchQueue.size());
     }
 
+    public String dumpNodeHierarchy(int blockX, int blockY, int blockZ) {
+        return this.manager.dumpNodeHierarchy(blockX, blockY, blockZ);
+    }
+
+    public String dumpL0Grid(int blockX, int blockY, int blockZ) {
+        return this.manager.dumpL0Grid(blockX, blockY, blockZ);
+    }
+
+    public String dumpGapTree(int blockX, int blockY, int blockZ) {
+        return this.manager.dumpGapTree(blockX, blockY, blockZ);
+    }
+
     public boolean hasWork() {
         return this.workCounter.get() != 0 || RESULT_HANDLE.get(this) != null;
     }

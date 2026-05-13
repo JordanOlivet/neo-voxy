@@ -468,6 +468,17 @@ public class VoxyRenderSystem {
             this.pipeline.addDebug(debug);
         }
         {
+            var player = net.minecraft.client.Minecraft.getInstance().player;
+            if (player != null) {
+                debug.add(this.nodeManager.dumpNodeHierarchy(
+                        player.getBlockX(), player.getBlockY(), player.getBlockZ()));
+                debug.add(this.nodeManager.dumpL0Grid(
+                        player.getBlockX(), player.getBlockY(), player.getBlockZ()));
+                debug.add(this.nodeManager.dumpGapTree(
+                        player.getBlockX(), player.getBlockY(), player.getBlockZ()));
+            }
+        }
+        {
             TimingStatistics.update();
             debug.add("Voxy frame runtime (millis): " + TimingStatistics.dynamic.pVal() + ", "
                     + TimingStatistics.main.pVal() + ", " + TimingStatistics.postDynamic.pVal() + ", "

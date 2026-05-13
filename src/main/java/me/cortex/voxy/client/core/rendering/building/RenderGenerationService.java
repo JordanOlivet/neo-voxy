@@ -163,6 +163,9 @@ public class RenderGenerationService {
         }
 
         if (section == null) {
+            if (WorldEngine.getLevel(task.position) <= 1) {
+                Logger.info("[GAP-DIAG] null section at " + WorldEngine.pprintPos(task.position));
+            }
             if (this.resultConsumer != null) {
                 this.resultConsumer.accept(BuiltSection.empty(task.position));
             }
@@ -290,6 +293,12 @@ public class RenderGenerationService {
         }
 
         if (mesh != null) {// If the mesh is null it means it didnt finish, so dont submit
+            if (WorldEngine.getLevel(task.position) <= 1) {
+                Logger.info("[GAP-DIAG] mesh " + WorldEngine.pprintPos(task.position)
+                        + " empty=" + mesh.isEmpty()
+                        + " children=0x" + Integer.toHexString(Byte.toUnsignedInt(mesh.childExistence))
+                        + " geo=" + (mesh.geometryBuffer != null ? mesh.geometryBuffer.size : 0));
+            }
             if (this.resultConsumer != null) {
                 this.resultConsumer.accept(mesh);
             } else {
