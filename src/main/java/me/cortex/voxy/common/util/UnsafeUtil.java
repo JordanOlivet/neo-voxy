@@ -13,15 +13,30 @@ import java.nio.ByteBuffer;
 public class UnsafeUtil {
     private static final Unsafe UNSAFE;
     private static final long BUFFER_ADDRESS_OFFSET;
+    private static final long BUFFER_CAPACITY_OFFSET;
+    private static final long BUFFER_LIMIT_OFFSET;
+    private static final long BUFFER_POSITION_OFFSET;
+    private static final long BUFFER_MARK_OFFSET;
+    private static final long BB_BIG_ENDIAN_OFFSET;
+    private static final Class<?> DIRECT_BYTE_BUFFER_CLASS;
     static {
         try {
             Field field = Unsafe.class.getDeclaredField("theUnsafe");
             field.setAccessible(true);
             UNSAFE = (Unsafe) field.get(null);
 
-            // Get the address field offset from DirectByteBuffer
-            Field addressField = Buffer.class.getDeclaredField("address");
-            BUFFER_ADDRESS_OFFSET = UNSAFE.objectFieldOffset(addressField);
+            // Cache Buffer/ByteBuffer field offsets so that createByteBuffer can
+            // allocate a DirectByteBuffer via Unsafe.allocateInstance and populate
+            // its fields directly. This avoids ByteBuffer.allocateDirect, which
+            // counts against -XX:MaxDirectMemorySize and was the source of a
+            // direct-memory OOM under bulk ingest (Chunky pregen).
+            BUFFER_ADDRESS_OFFSET = UNSAFE.objectFieldOffset(Buffer.class.getDeclaredField("address"));
+            BUFFER_CAPACITY_OFFSET = UNSAFE.objectFieldOffset(Buffer.class.getDeclaredField("capacity"));
+            BUFFER_LIMIT_OFFSET = UNSAFE.objectFieldOffset(Buffer.class.getDeclaredField("limit"));
+            BUFFER_POSITION_OFFSET = UNSAFE.objectFieldOffset(Buffer.class.getDeclaredField("position"));
+            BUFFER_MARK_OFFSET = UNSAFE.objectFieldOffset(Buffer.class.getDeclaredField("mark"));
+            BB_BIG_ENDIAN_OFFSET = UNSAFE.objectFieldOffset(ByteBuffer.class.getDeclaredField("bigEndian"));
+            DIRECT_BYTE_BUFFER_CLASS = Class.forName("java.nio.DirectByteBuffer");
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -121,27 +136,28 @@ public class UnsafeUtil {
 
     /**
      * Creates a ByteBuffer view of native memory at the given address.
-     * This properly wraps the native memory so that writes to the ByteBuffer
-     * are reflected in the native memory.
+     * Allocates a DirectByteBuffer instance via Unsafe.allocateInstance, bypassing
+     * its constructor entirely. This avoids ByteBuffer.allocateDirect (which
+     * reserves -XX:MaxDirectMemorySize-tracked memory and was leaking under bulk
+     * ingest when the reflective DirectByteBuffer(long,int) constructor path
+     * failed under JDK 21 strong encapsulation) and also avoids the per-call
+     * reflection cost of the previous implementation.
+     *
+     * Byte order is set to BIG_ENDIAN to match the default ByteBuffer order
+     * produced by the JNI DirectByteBuffer(long,int) constructor.
      */
     public static ByteBuffer createByteBuffer(long address, int size) {
         try {
-            // Get the DirectByteBuffer constructor that takes an address and capacity
-            Class<?> directByteBufferClass = Class.forName("java.nio.DirectByteBuffer");
-            var constructor = directByteBufferClass.getDeclaredConstructor(long.class, int.class);
-            constructor.setAccessible(true);
-            ByteBuffer buffer = (ByteBuffer) constructor.newInstance(address, size);
+            ByteBuffer buffer = (ByteBuffer) UNSAFE.allocateInstance(DIRECT_BYTE_BUFFER_CLASS);
+            UNSAFE.putLong(buffer, BUFFER_ADDRESS_OFFSET, address);
+            UNSAFE.putInt(buffer, BUFFER_MARK_OFFSET, -1);
+            UNSAFE.putInt(buffer, BUFFER_POSITION_OFFSET, 0);
+            UNSAFE.putInt(buffer, BUFFER_LIMIT_OFFSET, size);
+            UNSAFE.putInt(buffer, BUFFER_CAPACITY_OFFSET, size);
+            UNSAFE.putBoolean(buffer, BB_BIG_ENDIAN_OFFSET, true);
             return buffer;
         } catch (Exception e) {
-            // Fallback: try an alternative approach using Unsafe to set the address field
-            try {
-                ByteBuffer buffer = ByteBuffer.allocateDirect(size);
-                // Use Unsafe to set the address field directly
-                UNSAFE.putLong(buffer, BUFFER_ADDRESS_OFFSET, address);
-                return buffer;
-            } catch (Exception e2) {
-                throw new RuntimeException("Failed to create ByteBuffer wrapping native memory", e2);
-            }
+            throw new RuntimeException("Failed to create ByteBuffer wrapping native memory", e);
         }
     }
 
