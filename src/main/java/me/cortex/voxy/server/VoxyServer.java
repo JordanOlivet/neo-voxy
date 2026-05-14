@@ -80,6 +80,7 @@ public class VoxyServer {
             Logger.error("Failed to load voxy-server-config.json, using defaults", e);
             serverConfig = new VoxyServerConfig();
         }
+        me.cortex.voxy.common.VoxyDiag.setEnabled(serverConfig.isLogDiagFirstConnectEffective());
 
         // Dedicated server: provision the server-side LOD storage now so the spawn
         // chunks generated during world load can already be ingested. Single-player

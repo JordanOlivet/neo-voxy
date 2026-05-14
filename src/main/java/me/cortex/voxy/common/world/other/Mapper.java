@@ -282,44 +282,29 @@ public class Mapper {
     }
 
     /**
-     * Get block ID from a block state string (for network remapping).
-     * 
-     * @param blockStateString String representation of the block state
-     * @return The block ID, or -1 if not found
-     */
-    public int getIdForBlockStateString(String blockStateString) {
-        for (var entry : this.block2stateEntry.entrySet()) {
-            if (entry.getKey().toString().equals(blockStateString)) {
-                return entry.getValue().id;
-            }
-        }
-        return -1;
-    }
-
-    /**
      * Get or register block ID from a block state string.
      * If the block state doesn't exist in the mapper, parse and register it.
      * This is used when receiving LOD data from server with block states
      * the client hasn't encountered locally.
-     * 
+     * <p>
+     * Previously this method first ran a linear scan of every entry in
+     * {@code block2stateEntry} comparing {@code state.toString()} to the input
+     * — O(n²) when the server sync replays ~1200 strings, observed at ~1 s on
+     * the render thread during the mapper-sync handshake. The fallback is
+     * gone: parsing the string ourselves and using
+     * {@link #getIdForBlockState(BlockState)} gives an O(1) lookup that
+     * matches the canonical {@code state.toString()} form the server emits.
+     *
      * @param blockStateString String representation like
      *                         "Block{minecraft:oak_log}[axis=y]"
      * @return The block ID, or 0 (air) if parsing fails
      */
     public int getOrRegisterBlockStateFromString(String blockStateString) {
-        // First try direct lookup
-        int existing = getIdForBlockStateString(blockStateString);
-        if (existing >= 0) {
-            return existing;
-        }
-
-        // Parse and register the block state
         BlockState parsed = parseBlockStateString(blockStateString);
         if (parsed != null && !parsed.isAir()) {
             return getIdForBlockState(parsed);
         }
-
-        // Parsing failed - this shouldn't happen for valid blocks
+        // Parsing failed - block likely belongs to a mod not present on the client.
         return 0;
     }
 

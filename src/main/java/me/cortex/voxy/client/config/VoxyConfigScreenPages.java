@@ -180,6 +180,15 @@ public abstract class VoxyConfigScreenPages {
                         .setControl(TickBoxControl::new)
                         .setBinding((s, v) -> s.logGapDiag = v, s -> s.logGapDiag)
                         .build())
+                .add(OptionImpl.createBuilder(boolean.class, storage)
+                        .setName(Component.translatable("voxy.config.general.diag_first_connect"))
+                        .setTooltip(Component.translatable("voxy.config.general.diag_first_connect.tooltip"))
+                        .setControl(TickBoxControl::new)
+                        .setBinding((s, v) -> {
+                            s.diagFirstConnect = v;
+                            me.cortex.voxy.common.VoxyDiag.setEnabled(v);
+                        }, s -> s.diagFirstConnect)
+                        .build())
                 .build());
         return new OptionPage(Component.translatable("voxy.config.title"), ImmutableList.copyOf(groups));
     }

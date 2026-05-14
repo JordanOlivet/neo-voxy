@@ -44,6 +44,10 @@ public class VoxyServerCommands {
         LiteralArgumentBuilder<CommandSourceStack> voxyCommand = Commands.literal("voxyadmin")
                 .requires(source -> source.hasPermission(2)) // Require op level 2
 
+                .executes(context -> showHelp(context.getSource()))
+                .then(Commands.literal("help")
+                        .executes(context -> showHelp(context.getSource())))
+
                 // /voxyadmin status - Show status
                 .then(Commands.literal("status")
                         .executes(context -> showStatus(context.getSource())))
@@ -146,6 +150,29 @@ public class VoxyServerCommands {
 
         dispatcher.register(voxyCommand);
         Logger.info("Registered VoxyAdmin server commands");
+    }
+
+    /**
+     * Print a one-screen summary of every /voxyadmin subcommand with a short
+     * description of what it does and when to use it. Reached via /voxyadmin,
+     * /voxyadmin help.
+     */
+    private static int showHelp(CommandSourceStack source) {
+        source.sendSystemMessage(Component.literal("§6=== /voxyadmin commands (op level 2) ==="));
+        source.sendSystemMessage(Component.literal("§e/voxyadmin help §7- show this list"));
+        source.sendSystemMessage(Component.literal("§e/voxyadmin status §7- print WorldEngine status: active sections, ingest/save queue depth, dimension info."));
+        source.sendSystemMessage(Component.literal("§e/voxyadmin keep <seconds> §7- prevent the active WorldEngine from being unloaded by the idle cleaner for the given duration (1-3600s)."));
+        source.sendSystemMessage(Component.literal("§e/voxyadmin generate [radius] §7- enqueue LOD generation for chunks in a square radius (default 100) around the executor."));
+        source.sendSystemMessage(Component.literal("§e/voxyadmin generate <radius> <x> <z> §7- same, centered on absolute block coordinates."));
+        source.sendSystemMessage(Component.literal("§e/voxyadmin cancel §7- cancel a running /voxyadmin generate task."));
+        source.sendSystemMessage(Component.literal("§e/voxyadmin broadcast §7- force a sync request to every connected player (server re-pushes mapper + restreams)."));
+        source.sendSystemMessage(Component.literal("§e/voxyadmin regen <radiusChunks> §7- re-ingest currently-loaded chunks around the source position. Use when LODs are missing because the original ChunkEvent.Load skipped (proto-chunk, no lighting)."));
+        source.sendSystemMessage(Component.literal("§e/voxyadmin resync §7- clear per-player lastSentVersion + ring origin so every section currently in engine is resent to every connected player. Does NOT re-ingest chunks; pair with regen if engine itself is missing data."));
+        source.sendSystemMessage(Component.literal("§e/voxyadmin diag [radiusChunks] §7- print per-section bucket counts (engineHasContent / neverSent / needsResend / upToDate / engineEmpty / engineMissing) around the caller. Default 16 chunks."));
+        source.sendSystemMessage(Component.literal("§e/voxyadmin missing [radiusChunks] §7- list chunk coordinates whose voxy LOD-0 section is absent from the engine at any Y."));
+        source.sendSystemMessage(Component.literal("§e/voxyadmin checksection <lvl> <vx> <vy> <vz> §7- dump server-side engine state of a specific voxy section: presence, block count, child-existence mask, ingested-octant mask, version."));
+        source.sendSystemMessage(Component.literal("§e/voxyadmin reload-config §7- re-read voxy-server-config.json from disk and apply hot-reloadable fields (debug log toggles, radius caps, tick rates, diag flags)."));
+        return 1;
     }
 
     /**

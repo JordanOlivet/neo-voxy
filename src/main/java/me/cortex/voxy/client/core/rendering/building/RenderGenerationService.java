@@ -204,9 +204,8 @@ public class RenderGenerationService {
                     if (e.isIdBlockId) {
                         // TODO: maybe move this to _after_ task as been readded to queue??
                         if (!this.modelBakery.factory.hasModelForBlockId(e.id)) {
-                            if (seenMissedIds.add(e.id)) {
+                            if (this.modelBakery.requestBlockBake(e.id)) {
                                 Logger.info("Mesh generation delayed: requesting model for block ID " + e.id);
-                                this.modelBakery.requestBlockBake(e.id);
                             }
                         }
                     }
@@ -232,10 +231,9 @@ public class RenderGenerationService {
                 if (e.isIdBlockId) {
                     // TODO: maybe move this to _after_ task as been readded to queue??
                     if (!this.modelBakery.factory.hasModelForBlockId(e.id)) {
-                        if (seenMissedIds.add(e.id)) {
+                        if (this.modelBakery.requestBlockBake(e.id)) {
                             Logger.info(
                                     "Mesh generation delayed: requesting model for block ID " + e.id + " (retry path)");
-                            this.modelBakery.requestBlockBake(e.id);
                         }
                     }
                 }

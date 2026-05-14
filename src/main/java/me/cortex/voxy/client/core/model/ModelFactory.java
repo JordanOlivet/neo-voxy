@@ -161,6 +161,31 @@ public class ModelFactory {
 
     private final ConcurrentLinkedDeque<ResultUploader> uploadResults = new ConcurrentLinkedDeque<>();
 
+    // Monitor the bake worker thread waits on when both input queues are empty.
+    // Producers (addBiome / the download callback that pushes RawBakeResult) call
+    // notifyAll() after enqueueing so the worker resumes immediately instead of
+    // waiting out the timeout. The timeout in waitForWork() is just a safety net
+    // for missed notifies.
+    private final Object workNotifier = new Object();
+
+    private void signalWork() {
+        synchronized (this.workNotifier) {
+            this.workNotifier.notifyAll();
+        }
+    }
+
+    /**
+     * Block the calling thread until either input queue has work or the timeout
+     * elapses. Spurious wake-ups are fine: caller re-checks via processAllThings().
+     */
+    public void waitForWork(long timeoutMs) throws InterruptedException {
+        synchronized (this.workNotifier) {
+            if (this.biomeQueue.isEmpty() && this.rawBakeResults.isEmpty()) {
+                this.workNotifier.wait(timeoutMs);
+            }
+        }
+    }
+
     private Object2IntMap<BlockState> customBlockStateIdMapping;
 
     // TODO: NOTE!!! is it worth even uploading as a 16x16 texture, since automatic
@@ -245,7 +270,10 @@ public class ModelFactory {
 
         RawBakeResult result = new RawBakeResult(blockId, blockState);
         int allocation = this.downstream.download(MODEL_TEXTURE_SIZE * MODEL_TEXTURE_SIZE * 2 * 4 * 6,
-                ptr -> this.rawBakeResults.add(result.cpyBuf(ptr)));
+                ptr -> {
+                    this.rawBakeResults.add(result.cpyBuf(ptr));
+                    this.signalWork();
+                });
         this.bakery.renderToStream(blockState, this.downstream.getBufferId(), allocation);
         return true;
     }
@@ -284,6 +312,7 @@ public class ModelFactory {
 
     public void addBiome(Mapper.BiomeEntry biome) {
         this.biomeQueue.add(biome);
+        this.signalWork();
     }
 
     public void processAllThings() {
@@ -314,7 +343,17 @@ public class ModelFactory {
             ;
     }
 
-    public void tickAndProcessUploads() {
+    /**
+     * Drain pending GL uploads bounded by {@code budgetNanos}. Previously this
+     * method drained the entire {@code uploadResults} queue every frame, which on
+     * first-connect produced multi-hundred-ms main-thread spikes (one
+     * nglTextureSubImage2D per face per mip per baked block). Budgeting lets the
+     * initial flood spread over several frames so vanilla rendering keeps a slice
+     * of the main thread. Pass a large budget (e.g. 100 ms) from the frex
+     * "finish everything" path to preserve the old "drain it all" behavior.
+     */
+    public void tickAndProcessUploads(long budgetNanos) {
+        long start = System.nanoTime();
         this.downstream.tick();
 
         var upload = this.uploadResults.poll();
@@ -328,6 +367,9 @@ public class ModelFactory {
         do {
             upload.upload(this.storage);
             upload.free();
+            if ((System.nanoTime() - start) >= budgetNanos) {
+                break;
+            }
             upload = this.uploadResults.poll();
         } while (upload != null);
         UploadStream.INSTANCE.commit();
@@ -1155,5 +1197,13 @@ public class ModelFactory {
         size += this.uploadResults.size();
         size += this.biomeQueue.size();
         return size;
+    }
+
+    public int getUploadResultsSize() {
+        return this.uploadResults.size();
+    }
+
+    public int getRawBakeResultsSize() {
+        return this.rawBakeResults.size();
     }
 }

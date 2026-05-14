@@ -3,6 +3,7 @@ package me.cortex.voxy.client.core;
 import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.network.ClientCongestionControl;
 import me.cortex.voxy.common.Logger;
+import me.cortex.voxy.common.VoxyDiag;
 import me.cortex.voxy.common.network.BloomFilter;
 import me.cortex.voxy.common.network.IdRemapper;
 import me.cortex.voxy.common.network.VoxyNetworkHandler;
@@ -58,8 +59,30 @@ public class LodReceptionService implements AutoCloseable {
     /** Sections that have been received from the server */
     private final Set<Long> receivedSections = ConcurrentHashMap.newKeySet();
 
-    /** Sections pending processing because models aren't ready yet */
-    private final ConcurrentHashMap<Long, byte[]> pendingSections = new ConcurrentHashMap<>();
+    /**
+     * Sections pending processing because models aren't ready yet.
+     * <p>
+     * Previously this stored just the raw compressed byte[], which forced
+     * {@link #processPendingSections()} to LZ4-decompress every parked
+     * section on every main-thread tick to re-check model availability. On
+     * cold first-connect the queue grew to ~2000 entries while models were
+     * still baking, and the recurring decompress-storm stalled the render
+     * thread for >1.5 s per frame. {@link PendingEntry} caches the sampled
+     * required-blockId set when the section is first parked so the recheck
+     * is O(set.size) hash lookups with no LZ4 work at all.
+     */
+    private final ConcurrentHashMap<Long, PendingEntry> pendingSections = new ConcurrentHashMap<>();
+
+    private static final class PendingEntry {
+        final byte[] data;
+        /** Unique sampled blockIds that must be baked before this section can apply. */
+        final int[] requiredBlockIds;
+
+        PendingEntry(byte[] data, int[] requiredBlockIds) {
+            this.data = data;
+            this.requiredBlockIds = requiredBlockIds;
+        }
+    }
 
     /** Whether the mapper has been synced (required for processing) */
     private volatile boolean mapperReady = false;
@@ -158,6 +181,8 @@ public class LodReceptionService implements AutoCloseable {
         if (!syncRequested) {
             syncRequested = true;
             Logger.info("Requesting LOD sync for server-driven streaming");
+            VoxyDiag.startWindow(60);
+            VoxyDiag.event("syncRequested");
             boolean sent = VoxyNetworkHandler.sendToServer(VoxyPacketPayload.syncRequest());
             if (!sent) {
                 Logger.warn("Initial sync request not delivered — falling back to client-local ingest");
@@ -172,7 +197,26 @@ public class LodReceptionService implements AutoCloseable {
 
         // Process pending sections whose models are now available
         if (!pendingSections.isEmpty()) {
+            long t0 = VoxyDiag.isEnabled() ? System.nanoTime() : 0L;
             processPendingSections();
+            if (VoxyDiag.isEnabled()) {
+                VoxyDiag.timing("processPendingSections", System.nanoTime() - t0, 5_000_000L);
+            }
+        }
+
+        if (VoxyDiag.shouldSnapshot()) {
+            VoxyDiag.log("rx pend=" + pendingSections.size()
+                    + " cached=" + receivedSections.size()
+                    + " rcv=" + sectionsReceived.get()
+                    + " app=" + sectionsApplied.get()
+                    + " reassembly=" + reassemblyBuffers.size()
+                    + " mapperReady=" + mapperReady
+                    + " | bake queued=" + modelBakery.getQueuedBakeCount()
+                    + " inflight=" + modelBakery.getInflightBakeCount()
+                    + " baked=" + modelBakery.getBakedCount()
+                    + " upQ=" + modelBakery.getQueuedUploadCount()
+                    + " rawQ=" + modelBakery.getRawBakeResultsSize()
+                    + " fps=" + net.minecraft.client.Minecraft.getInstance().getFps());
         }
     }
 
@@ -213,11 +257,33 @@ public class LodReceptionService implements AutoCloseable {
 
     /**
      * Handle mapper sync from server.
+     * <p>
+     * Building the remap tables walks ~1200 block-state strings, parsing each
+     * via the vanilla block registry. Even with the O(1) lookup fix in
+     * {@link me.cortex.voxy.common.world.other.Mapper#getOrRegisterBlockStateFromString}
+     * the parse loop still allocates and registers new entries; doing it on
+     * the network/render thread costs noticeable frames. Hand the work off to
+     * {@link #processingExecutor} — everything else gates on
+     * {@link IdRemapper#isReady()}, so any LOD sections that arrive while the
+     * build is in flight simply sit in {@code pendingSections} and replay
+     * once {@code mapperReady} flips.
      */
     private void handleMapperSync(VoxyPacketPayload payload) {
-        Logger.info("Received mapper sync from server (" + payload.data().length + " bytes)");
-        idRemapper.buildFromServerData(payload.data(), clientMapper);
-        mapperReady = true;
+        final byte[] data = payload.data();
+        Logger.info("Received mapper sync from server (" + data.length + " bytes)");
+        VoxyDiag.event("mapperSyncReceived bytes=" + data.length);
+        final long t0 = System.nanoTime();
+        processingExecutor.submit(() -> {
+            try {
+                idRemapper.buildFromServerData(data, clientMapper);
+                long ms = (System.nanoTime() - t0) / 1_000_000L;
+                Logger.info("ID remapper built off-thread in " + ms + "ms");
+                VoxyDiag.event("remapperBuilt " + ms + "ms (off-thread)");
+                mapperReady = true;
+            } catch (Throwable t) {
+                Logger.error("Failed to build ID remapper", t);
+            }
+        });
     }
 
     /**
@@ -271,6 +337,8 @@ public class LodReceptionService implements AutoCloseable {
     private void handleSyncComplete(VoxyPacketPayload payload) {
         Logger.info("LOD sync complete! Received: " + sectionsReceived.get() +
                 ", Applied: " + sectionsApplied.get());
+        VoxyDiag.event("syncComplete rcv=" + sectionsReceived.get()
+                + " app=" + sectionsApplied.get());
     }
 
     /**
@@ -307,10 +375,15 @@ public class LodReceptionService implements AutoCloseable {
             long key = sectionData.getKey();
 
             // Check if all required models for this section are available
-            if (sectionData.hasData() && !areModelsAvailable(sectionData.voxelData)) {
-                // Models not ready yet, queue for later processing
-                pendingSections.put(key, data);
-                return;
+            if (sectionData.hasData()) {
+                int[] requiredIds = sampleRequiredBlockIds(sectionData.voxelData);
+                if (!allModelsReady(requiredIds)) {
+                    // Models not ready yet, queue for later processing. Cache the
+                    // sampled blockIds so the tick recheck doesn't need to LZ4
+                    // decompress the byte[] again.
+                    pendingSections.put(key, new PendingEntry(data, requiredIds));
+                    return;
+                }
             }
 
             // Mark as received
@@ -364,69 +437,71 @@ public class LodReceptionService implements AutoCloseable {
     }
 
     /**
-     * Checks if all models referenced in the voxel data are available in the model
-     * bakery.
-     *
-     * @param voxelData The voxel data array.
-     * @return True if all models are available, false otherwise.
+     * Sample {@code voxelData} for the unique client-side blockIds that need to
+     * be baked before the section can apply. Done once when a section is first
+     * deserialized so the tick recheck doesn't need to LZ4-decompress the
+     * payload again. Mirrors the legacy {@code areModelsAvailable} sampling
+     * cadence (every 64th voxel, cap at 16 unique blocks) — we only need a
+     * representative subset, not a true union, because any one missing model
+     * already forces the section to wait.
      */
-    private boolean areModelsAvailable(long[] voxelData) {
-        if (!idRemapper.isReady()) {
-            return false; // Cannot check model availability without a remapper
-        }
-        // Sample voxel data to check if models are ready
-        // Only check a small sample to avoid performance issues
-        it.unimi.dsi.fastutil.ints.IntOpenHashSet checkedBlocks = new it.unimi.dsi.fastutil.ints.IntOpenHashSet();
-
-        // Sample every 64th voxel to keep it fast
+    private int[] sampleRequiredBlockIds(long[] voxelData) {
+        boolean remapReady = idRemapper.isReady();
+        it.unimi.dsi.fastutil.ints.IntOpenHashSet seen = new it.unimi.dsi.fastutil.ints.IntOpenHashSet();
         int step = Math.max(1, voxelData.length / 64);
         for (int i = 0; i < voxelData.length; i += step) {
-            long serverVoxel = voxelData[i];
-            long clientVoxel = idRemapper.remapVoxelId(serverVoxel);
-            int clientBlockId = me.cortex.voxy.common.world.other.Mapper.getBlockId(clientVoxel);
-            if (clientBlockId != 0 && checkedBlocks.add(clientBlockId)) {
-                if (!modelBakery.factory.hasModelForBlockId(clientBlockId)) {
-                    // Request the model to be baked
-                    modelBakery.requestBlockBake(clientBlockId);
-                    return false;
-                }
+            long voxel = voxelData[i];
+            long client = remapReady ? idRemapper.remapVoxelId(voxel) : voxel;
+            int blockId = me.cortex.voxy.common.world.other.Mapper.getBlockId(client);
+            if (blockId != 0) {
+                seen.add(blockId);
+                if (seen.size() >= 16) break;
             }
-            // Limit checking to first 16 unique blocks to keep it fast
-            if (checkedBlocks.size() >= 16) {
-                break;
+        }
+        return seen.toIntArray();
+    }
+
+    /**
+     * Returns {@code true} iff every blockId in {@code requiredBlockIds} has a
+     * baked model. Missing models trigger a {@code requestBlockBake} (which is
+     * itself dedup'd internally) so the bake pipeline keeps making progress as
+     * the tick re-polls. Cheap — no LZ4, no allocations beyond the per-call
+     * iteration. Pre-condition for applying a pending section to the world
+     * engine.
+     */
+    private boolean allModelsReady(int[] requiredBlockIds) {
+        if (!idRemapper.isReady()) {
+            return false;
+        }
+        for (int id : requiredBlockIds) {
+            if (!modelBakery.factory.hasModelForBlockId(id)) {
+                modelBakery.requestBlockBake(id);
+                return false;
             }
         }
         return true;
     }
 
     /**
-     * Processes sections that were previously queued because their models were not
-     * ready.
+     * Processes sections that were previously queued because their models were
+     * not ready. Walks the pending map without re-deserializing the payload —
+     * each entry's cached {@code requiredBlockIds} array is matched against
+     * {@code ModelFactory.hasModelForBlockId}, and ready entries are atomically
+     * removed (via {@code remove(key, value)}) and shipped to the processing
+     * executor. The previous implementation ran a fresh
+     * {@link SectionSerializer#deserialize} per pending entry per tick, which
+     * stalled the render thread by >1.5 s during the initial bake storm.
      */
     private void processPendingSections() {
-        // Create a temporary list to avoid ConcurrentModificationException
-        // and to allow processing in batches
-        Set<Long> sectionsToProcess = ConcurrentHashMap.newKeySet();
-        for (Long key : pendingSections.keySet()) {
-            sectionsToProcess.add(key);
-        }
-
-        for (Long key : sectionsToProcess) {
-            byte[] data = pendingSections.get(key);
-            if (data != null) {
-                try {
-                    SectionSerializer.SectionData sectionData = SectionSerializer.deserialize(data);
-                    if (sectionData != null && areModelsAvailable(sectionData.voxelData)) {
-                        pendingSections.remove(key);
-                        // Submit to processing executor to maintain consistent processing flow
-                        processingExecutor.submit(() -> processSection(data));
-                    }
-                } catch (Exception e) {
-                    Logger.error(
-                            "Error re-processing pending section " + Long.toHexString(key) + ": " + e.getMessage());
-                    Logger.error(e);
-                    pendingSections.remove(key); // Remove to avoid infinite retries on error
-                }
+        var it = pendingSections.entrySet().iterator();
+        while (it.hasNext()) {
+            var entry = it.next();
+            PendingEntry pending = entry.getValue();
+            if (pending == null) continue;
+            if (!allModelsReady(pending.requiredBlockIds)) continue;
+            if (pendingSections.remove(entry.getKey(), pending)) {
+                final byte[] data = pending.data;
+                processingExecutor.submit(() -> processSection(data));
             }
         }
     }
@@ -477,6 +552,22 @@ public class LodReceptionService implements AutoCloseable {
         return String.format("Received: %d, Applied: %d, Cached: %d",
                 sectionsReceived.get(), sectionsApplied.get(),
                 receivedSections.size());
+    }
+
+    public int getPendingSize() {
+        return this.pendingSections.size();
+    }
+
+    public int getReceivedCacheSize() {
+        return this.receivedSections.size();
+    }
+
+    public int getSectionsReceived() {
+        return this.sectionsReceived.get();
+    }
+
+    public int getSectionsApplied() {
+        return this.sectionsApplied.get();
     }
 
     @Override

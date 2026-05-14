@@ -1,6 +1,7 @@
 package me.cortex.voxy.common.world.service;
 
 import me.cortex.voxy.common.Logger;
+import me.cortex.voxy.common.VoxyDiag;
 import me.cortex.voxy.common.network.*;
 import me.cortex.voxy.common.world.SectionSerializer;
 import me.cortex.voxy.common.world.WorldEngine;
@@ -323,6 +324,8 @@ public class LodStreamingService implements AutoCloseable {
                     byte[] data = lookupOrSerialize(capturedSection, version);
                     if (data != null) {
                         state.sender.queueSection(data, (int) key);
+                        state.sectionsSentCount.incrementAndGet();
+                        state.bytesSentCount.addAndGet(data.length);
                     }
                 } catch (Throwable t) {
                     Logger.error("fast-push serialize failed for " + WorldEngine.pprintPos(key), t);
@@ -415,6 +418,8 @@ public class LodStreamingService implements AutoCloseable {
 
     public void startSyncForPlayer(ServerPlayer player) {
         Logger.info("Received sync request from " + player.getName().getString());
+        VoxyDiag.startWindow(60);
+        VoxyDiag.event("startSyncForPlayer name=" + player.getName().getString());
 
         PlayerStreamingState state = playerStates.computeIfAbsent(
                 player.getUUID(),
@@ -562,6 +567,30 @@ public class LodStreamingService implements AutoCloseable {
 
             if (state.currentRing < radius) {
                 state.currentRing++;
+            }
+
+            if (VoxyDiag.shouldSnapshot()) {
+                long now = System.nanoTime();
+                long sentDelta = state.sectionsSentCount.get() - state.lastSnapshotSectionsSent;
+                long bytesDelta = state.bytesSentCount.get() - state.lastSnapshotBytesSent;
+                long elapsedNs = state.lastSnapshotNanos == 0L ? 1L : now - state.lastSnapshotNanos;
+                long kbps = (bytesDelta * 1_000_000_000L) / Math.max(1L, elapsedNs) / 1024L;
+                state.lastSnapshotSectionsSent = state.sectionsSentCount.get();
+                state.lastSnapshotBytesSent = state.bytesSentCount.get();
+                state.lastSnapshotNanos = now;
+                int dirtyQueue;
+                synchronized (dirtyLock) { dirtyQueue = recentlyDirtyKeys.size(); }
+                VoxyDiag.log("stream " + player.getName().getString()
+                        + " pos=(" + px + "," + pz + ")"
+                        + " ring=" + state.currentRing + "/" + radius
+                        + " maintenance=" + state.inMaintenance
+                        + " sent=" + state.sectionsSentCount.get()
+                        + " (+" + sentDelta + "/s)"
+                        + " kbps=" + kbps
+                        + " lastSentMap=" + state.lastSentVersion.size()
+                        + " dirtyQueue=" + dirtyQueue
+                        + " dirtyFlushedThisTick=" + dirtyFlushed
+                        + " ringFoundThisTick=" + sectionsFound);
             }
 
             // Switch to slow-tick once we've exhausted active rings, but the dirty-push
@@ -747,6 +776,8 @@ public class LodStreamingService implements AutoCloseable {
                         byte[] data = lookupOrSerialize(capturedSection, version);
                         if (data != null) {
                             state.sender.queueSection(data, (int) key);
+                            state.sectionsSentCount.incrementAndGet();
+                            state.bytesSentCount.addAndGet(data.length);
                         }
                     } catch (Throwable t) {
                         Logger.error("async serialize failed for " + WorldEngine.pprintPos(key), t);
@@ -1074,6 +1105,20 @@ public class LodStreamingService implements AutoCloseable {
         int lastPlayerSectionX = Integer.MIN_VALUE;
         int lastPlayerSectionZ = Integer.MIN_VALUE;
         long lastTickNanos = 0L;
+
+        // Diagnostics counters: total sections handed to the sender + total payload
+        // bytes (sum of serialized section.length). Read by the VoxyDiag snapshot
+        // path; never read by streaming logic, so plain longs guarded by volatile
+        // would suffice — using java.util.concurrent.atomic.* keeps the increments
+        // lock-free when the dirty-callback worker and the scheduled tick both
+        // queue sections for the same player.
+        final java.util.concurrent.atomic.AtomicLong sectionsSentCount =
+                new java.util.concurrent.atomic.AtomicLong();
+        final java.util.concurrent.atomic.AtomicLong bytesSentCount =
+                new java.util.concurrent.atomic.AtomicLong();
+        long lastSnapshotSectionsSent = 0L;
+        long lastSnapshotBytesSent = 0L;
+        long lastSnapshotNanos = 0L;
 
         ScheduledFuture<?> scheduledHandle;
 

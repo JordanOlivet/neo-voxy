@@ -568,45 +568,132 @@ public class VoxyRenderSystem {
         return this.worldIn;
     }
 
+    // Block path-names whose every {@link BlockState} should be pre-baked at
+    // world load. Curated to cover world-gen and the broad set of decorative
+    // blocks players touch most. Pairs with {@link #PREBAKE_BLOCK_SUFFIXES} —
+    // anything matching either is enumerated. Excluding glazed_terracotta /
+    // stairs / slabs / walls keeps the bake count bounded (Mojang stairs+slabs
+    // alone would be 100+ block types × dozens of blockstates each).
+    private static final java.util.Set<String> PREBAKE_BLOCK_EXACT = java.util.Set.of(
+            "stone", "cobblestone", "mossy_cobblestone", "smooth_stone",
+            "granite", "andesite", "diorite",
+            "polished_granite", "polished_andesite", "polished_diorite",
+            "calcite", "tuff", "dripstone_block", "pointed_dripstone",
+            "deepslate", "cobbled_deepslate", "polished_deepslate",
+            "basalt", "smooth_basalt", "blackstone", "gilded_blackstone",
+            "netherrack", "soul_sand", "soul_soil",
+            "end_stone", "obsidian", "crying_obsidian", "magma_block",
+            "glowstone", "shroomlight",
+            "dirt", "grass_block", "podzol", "mycelium",
+            "coarse_dirt", "rooted_dirt", "mud", "packed_mud",
+            "sand", "red_sand", "gravel", "suspicious_sand", "suspicious_gravel",
+            "snow", "snow_block", "ice", "packed_ice", "blue_ice", "powder_snow",
+            "water", "lava",
+            "terracotta",
+            "sandstone", "red_sandstone", "smooth_sandstone", "smooth_red_sandstone",
+            "cut_sandstone", "chiseled_sandstone", "cut_red_sandstone", "chiseled_red_sandstone",
+            "bamboo", "bamboo_block", "bamboo_mosaic",
+            "amethyst_block", "budding_amethyst",
+            "moss_block", "moss_carpet", "pale_moss_block", "pale_moss_carpet",
+            "mangrove_roots", "muddy_mangrove_roots",
+            "azalea", "flowering_azalea",
+            "pumpkin", "carved_pumpkin", "jack_o_lantern", "melon", "hay_block",
+            "clay", "honey_block", "slime_block", "honeycomb_block",
+            "nether_quartz_ore", "ancient_debris", "nether_gold_ore",
+            "bone_block", "spawner", "barrel",
+            "prismarine", "prismarine_bricks", "dark_prismarine", "sea_lantern",
+            "iron_block", "gold_block", "diamond_block", "emerald_block",
+            "redstone_block", "lapis_block", "coal_block", "copper_block",
+            "raw_iron_block", "raw_gold_block", "raw_copper_block",
+            "netherite_block",
+            "quartz_block", "smooth_quartz", "chiseled_quartz_block",
+            "purpur_block", "purpur_pillar", "end_stone_bricks",
+            "crimson_nylium", "warped_nylium", "crimson_planks", "warped_planks",
+            "warped_wart_block", "nether_wart_block",
+            "stone_bricks", "mossy_stone_bricks", "cracked_stone_bricks", "chiseled_stone_bricks",
+            "deepslate_bricks", "cracked_deepslate_bricks", "chiseled_deepslate",
+            "deepslate_tiles", "cracked_deepslate_tiles",
+            "bricks", "mud_bricks", "nether_bricks", "red_nether_bricks",
+            "polished_blackstone", "polished_blackstone_bricks"
+    );
+
+    // Block path-name suffixes that pick up the long tail of LOD-visible
+    // material types (every wood, every leaf type, every ore variant, all
+    // wools/terracottas/concretes). Slabs/stairs/walls are deliberately
+    // excluded.
+    private static final String[] PREBAKE_BLOCK_SUFFIXES = {
+            "_log", "_wood", "_leaves", "_planks",
+            "_ore",
+            "_terracotta", "_concrete", "_concrete_powder",
+            "_wool",
+            "_stem", "_hyphae",
+            "_sapling"
+    };
+
+    // Hard cap on the number of bake requests pre-baking will enqueue. Each
+    // request triggers a GL render-to-FBO + readback path on the main thread,
+    // so an unbounded burst can stall the title-screen / loading transitions.
+    // Empirically the curated list above generates ~1.5k blockstates — the cap
+    // is mostly a backstop against future Mojang additions.
+    private static final int PREBAKE_MAX_REQUESTS = 2500;
+
     /**
      * Pre-bakes models for common blocks to avoid black faces on initial join.
      * This gives the model baking system a head start before LOD data arrives.
+     * <p>
+     * Iterates the block registry, filters by {@link #PREBAKE_BLOCK_EXACT} and
+     * {@link #PREBAKE_BLOCK_SUFFIXES}, and enumerates every {@link
+     * net.minecraft.world.level.block.state.BlockState} of each matching block
+     * so axis / distance / persistent / waterlogged / age variants all get a
+     * bake request. Previously the helper only requested 16 hard-coded names
+     * via {@code mapper.getOrRegisterBlockStateFromString(name + "[]")}, which
+     * meant a single default state per block — the rest hit the mesh-gen
+     * retry path on first connect and produced the "Mesh generation delayed"
+     * storm.
      */
     private static void prebakeCommonModels(WorldEngine world, ModelBakerySubsystem modelService) {
         var mapper = world.getMapper();
+        int matchedBlocks = 0;
+        int requested = 0;
+        int statesSeen = 0;
 
-        // Common blocks that are likely to appear in LODs
-        String[] commonBlockNames = {
-                "minecraft:stone",
-                "minecraft:dirt",
-                "minecraft:grass_block",
-                "minecraft:water",
-                "minecraft:sand",
-                "minecraft:gravel",
-                "minecraft:oak_log",
-                "minecraft:oak_leaves",
-                "minecraft:spruce_log",
-                "minecraft:spruce_leaves",
-                "minecraft:birch_log",
-                "minecraft:birch_leaves",
-                "minecraft:snow",
-                "minecraft:ice",
-                "minecraft:cobblestone",
-                "minecraft:deepslate"
-        };
-
-        for (String blockName : commonBlockNames) {
-            try {
-                int blockId = mapper.getOrRegisterBlockStateFromString(blockName + "[]");
-                if (blockId > 0) {
-                    modelService.requestBlockBake(blockId);
-                }
-            } catch (Exception e) {
-                // Ignore if block doesn't exist in this version
+        for (var block : net.minecraft.core.registries.BuiltInRegistries.BLOCK) {
+            var rl = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(block);
+            if (rl == null || !"minecraft".equals(rl.getNamespace())) continue;
+            String path = rl.getPath();
+            // Skip families whose blockstate fan-out is huge and rarely visible in LOD.
+            if (path.endsWith("_stairs") || path.endsWith("_slab") || path.endsWith("_wall")
+                    || path.endsWith("_fence") || path.endsWith("_fence_gate")
+                    || path.endsWith("_door") || path.endsWith("_trapdoor")
+                    || path.endsWith("_glazed_terracotta")) {
+                continue;
             }
+            boolean matches = PREBAKE_BLOCK_EXACT.contains(path);
+            if (!matches) {
+                for (String suffix : PREBAKE_BLOCK_SUFFIXES) {
+                    if (path.endsWith(suffix)) { matches = true; break; }
+                }
+            }
+            if (!matches) continue;
+            matchedBlocks++;
+
+            for (var state : block.getStateDefinition().getPossibleStates()) {
+                statesSeen++;
+                if (requested >= PREBAKE_MAX_REQUESTS) break;
+                try {
+                    int blockId = mapper.getIdForBlockState(state);
+                    if (blockId > 0 && modelService.requestBlockBake(blockId)) {
+                        requested++;
+                    }
+                } catch (Exception ignore) {
+                    // Some blocks may not survive the mapper round-trip on exotic mods.
+                }
+            }
+            if (requested >= PREBAKE_MAX_REQUESTS) break;
         }
 
-        Logger.info("Requested pre-baking of " + commonBlockNames.length + " common block models");
+        Logger.info("Requested pre-baking of " + requested + " block states across "
+                + matchedBlocks + " block types (out of " + statesSeen + " enumerated)");
     }
 
     public LodReceptionService getLodReceptionService() {

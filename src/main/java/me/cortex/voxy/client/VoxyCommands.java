@@ -65,6 +65,9 @@ public class VoxyCommands {
         }
 
         return Commands.literal("voxy")
+                .executes(VoxyCommands::showHelp)
+                .then(Commands.literal("help")
+                        .executes(VoxyCommands::showHelp))
                 .then(Commands.literal("reload")
                         .executes(VoxyCommands::reloadInstance))
                 .then(Commands.literal("sync")
@@ -78,6 +81,27 @@ public class VoxyCommands {
                 .then(Commands.literal("dumpAtlas")
                         .executes(VoxyCommands::dumpAtlas))
                 .then(imports);
+    }
+
+    private static int showHelp(CommandContext<CommandSourceStack> ctx) {
+        var src = ctx.getSource();
+        src.sendSystemMessage(Component.literal("§6=== Voxy client commands ==="));
+        src.sendSystemMessage(Component.literal("§e/voxy help §7- show this list"));
+        src.sendSystemMessage(Component.literal("§e/voxy reload §7- tear down and recreate the client Voxy instance (storage, render system, network). Use after corrupted local state or to apply config changes that need a full restart."));
+        src.sendSystemMessage(Component.literal("§e/voxy sync §7- request a fresh LOD sync from the server (re-issues the handshake; the server resends mapper + restreams the current radius). Use when LODs look stale or partial."));
+        src.sendSystemMessage(Component.literal("§e/voxy debugBounds §7- toggle the rendering of ChunkBoundRenderer's tracked vanilla-RD bounding boxes for debugging."));
+        src.sendSystemMessage(Component.literal("§e/voxy dumpbounds [radius] §7- dump (to chat + log) the per-section tracked/orphan/missing state around the player. Default radius = RD+3 sections."));
+        src.sendSystemMessage(Component.literal("§e/voxy dumpAtlas §7- write the Voxy model atlas (mip 0) to <gameDir>/voxy-atlas-<timestamp>.png. Useful to verify the baked textures."));
+        src.sendSystemMessage(Component.literal("§6Import (local ingest from other LOD mods/worlds):"));
+        src.sendSystemMessage(Component.literal("§e/voxy import world <name> §7- import a vanilla world save by folder name."));
+        src.sendSystemMessage(Component.literal("§e/voxy import bobby <name> §7- import a Bobby LOD cache by world name."));
+        src.sendSystemMessage(Component.literal("§e/voxy import raw <path> §7- import raw section data from a directory path."));
+        src.sendSystemMessage(Component.literal("§e/voxy import zip <zipPath> [innerPath] §7- import from a ZIP archive."));
+        if (DHImporter.HasRequiredLibraries) {
+            src.sendSystemMessage(Component.literal("§e/voxy import distant_horizons <sqlDbPath> §7- import a Distant Horizons sqlite DB (path to .sqlite file)."));
+        }
+        src.sendSystemMessage(Component.literal("§e/voxy import cancel §7- cancel an in-progress import."));
+        return 1;
     }
 
     // Dumps the Voxy model atlas (mip 0) to <gameDir>/voxy-atlas-<timestamp>.png.

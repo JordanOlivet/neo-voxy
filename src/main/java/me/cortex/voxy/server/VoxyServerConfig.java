@@ -136,6 +136,15 @@ public class VoxyServerConfig {
      */
     public boolean logLatency = false;
 
+    /**
+     * When {@code true}, open a 60s "first-connect" diagnostic window each time
+     * a player issues a sync request. While the window is open, the streamer
+     * emits a 1Hz per-player snapshot of dirty-queue depth, sections sent,
+     * bytes/s, currentRing, and inMaintenance flag. Honored only when
+     * {@link #debugLogActivated} is also {@code true}.
+     */
+    public boolean logDiagFirstConnect = false;
+
     private transient Path configPath;
 
     public static VoxyServerConfig load(Path serverRoot) {
@@ -183,6 +192,7 @@ public class VoxyServerConfig {
             this.logVersionSkips = fresh.logVersionSkips;
             this.dirtyDrainMaxPerTick = fresh.dirtyDrainMaxPerTick;
             this.logLatency = fresh.logLatency;
+            this.logDiagFirstConnect = fresh.logDiagFirstConnect;
             this.perPlayerLimitKBps = fresh.perPlayerLimitKBps;
             this.globalLimitKBps = fresh.globalLimitKBps;
             this.serializeThreads = fresh.serializeThreads;
@@ -216,6 +226,10 @@ public class VoxyServerConfig {
 
     public boolean isLogDirtyDrainEffective() {
         return debugLogActivated && logDirtyDrain;
+    }
+
+    public boolean isLogDiagFirstConnectEffective() {
+        return debugLogActivated && logDiagFirstConnect;
     }
 
     public int effectiveSerializeThreads() {
