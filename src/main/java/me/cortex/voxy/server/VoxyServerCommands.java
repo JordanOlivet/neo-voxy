@@ -108,7 +108,41 @@ public class VoxyServerCommands {
                         .then(Commands.argument("radiusChunks", IntegerArgumentType.integer(1, 256))
                                 .executes(context -> diagSnapshot(
                                         context.getSource(),
-                                        IntegerArgumentType.getInteger(context, "radiusChunks")))));
+                                        IntegerArgumentType.getInteger(context, "radiusChunks")))))
+
+                // /voxyadmin missing [radiusChunks] - list the chunk coordinates whose
+                // voxy LOD-0 section is not in the engine at any Y. Tells you which
+                // chunks the server never ingested when the diag shows engineMissing.
+                .then(Commands.literal("missing")
+                        .executes(context -> missingChunks(context.getSource(), 16))
+                        .then(Commands.argument("radiusChunks", IntegerArgumentType.integer(1, 256))
+                                .executes(context -> missingChunks(
+                                        context.getSource(),
+                                        IntegerArgumentType.getInteger(context, "radiusChunks")))))
+
+                // /voxyadmin checksection <lvl> <vx> <vy> <vz> - dump server-side
+                // engine state of a specific voxy section (any LOD level). Reports
+                // whether engine has the section, its block count, child-existence
+                // mask, ingested-octant mask, and version. Use to confirm whether a
+                // missing client-side LOD is caused by missing engine data, broken
+                // mask propagation, or streaming dedup.
+                .then(Commands.literal("checksection")
+                        .then(Commands.argument("lvl", IntegerArgumentType.integer(0, 4))
+                                .then(Commands.argument("vx", IntegerArgumentType.integer())
+                                        .then(Commands.argument("vy", IntegerArgumentType.integer())
+                                                .then(Commands.argument("vz", IntegerArgumentType.integer())
+                                                        .executes(context -> checkSection(
+                                                                context.getSource(),
+                                                                IntegerArgumentType.getInteger(context, "lvl"),
+                                                                IntegerArgumentType.getInteger(context, "vx"),
+                                                                IntegerArgumentType.getInteger(context, "vy"),
+                                                                IntegerArgumentType.getInteger(context, "vz"))))))))
+
+                // /voxyadmin reload-config - re-read voxy-server-config.json from
+                // disk and apply hot-reloadable fields (debug log toggles, etc).
+                // Avoids needing a server restart for tweaking log verbosity.
+                .then(Commands.literal("reload-config")
+                        .executes(context -> reloadConfig(context.getSource())));
 
         dispatcher.register(voxyCommand);
         Logger.info("Registered VoxyAdmin server commands");
@@ -328,6 +362,7 @@ public class VoxyServerCommands {
 
         int queued = 0;
         int notLoaded = 0;
+        int enqueueRejected = 0;
         var chunkSource = serverLevel.getChunkSource();
         for (int dx = -radiusChunks; dx <= radiusChunks; dx++) {
             for (int dz = -radiusChunks; dz <= radiusChunks; dz++) {
@@ -341,6 +376,8 @@ public class VoxyServerCommands {
                 try {
                     if (instance.getIngestService().enqueueIngest(engine, chunk)) {
                         queued++;
+                    } else {
+                        enqueueRejected++;
                     }
                 } catch (Exception e) {
                     Logger.error("regen failed at " + chunk.getPos(), e);
@@ -349,9 +386,10 @@ public class VoxyServerCommands {
         }
         final int qF = queued;
         final int nF = notLoaded;
+        final int rF = enqueueRejected;
         source.sendSuccess(() -> Component.literal(
-                "Regen: " + qF + " chunks re-ingested, " + nF + " not currently loaded (within " +
-                        radiusChunks + "-chunk radius)"), true);
+                "Regen: " + qF + " ingested, " + rF + " rejected (no lighting/proto/etc), " + nF +
+                        " not currently loaded — radius=" + radiusChunks + "ch"), true);
         return qF;
     }
 
@@ -378,6 +416,158 @@ public class VoxyServerCommands {
             return 0;
         }
         String report = service.diagPlayer(player, radiusChunks);
+        source.sendSuccess(() -> Component.literal(report), true);
+        return 1;
+    }
+
+    /**
+     * List chunk (X,Z) coords whose voxy LOD-0 section is absent from the engine
+     * at every Y. Use to identify which chunks the server never ingested.
+     */
+    private static int missingChunks(CommandSourceStack source, int radiusChunks) {
+        if (!(source.getLevel() instanceof ServerLevel serverLevel)) {
+            source.sendFailure(Component.literal("This command must be run in a server world"));
+            return 0;
+        }
+        ServerPlayer player;
+        try {
+            player = source.getPlayerOrException();
+        } catch (Exception e) {
+            source.sendFailure(Component.literal("This command must be run by a player"));
+            return 0;
+        }
+        WorldIdentifier worldId = WorldIdentifier.of(serverLevel);
+        if (worldId == null) {
+            source.sendFailure(Component.literal("No WorldIdentifier"));
+            return 0;
+        }
+        var instance = VoxyCommon.getInstance();
+        if (instance == null) {
+            source.sendFailure(Component.literal("No VoxyCommon instance"));
+            return 0;
+        }
+        var engine = instance.getNullable(worldId);
+        if (engine == null) {
+            source.sendFailure(Component.literal("No engine for this level"));
+            return 0;
+        }
+        int pcx = player.getBlockX() >> 4;
+        int pcz = player.getBlockZ() >> 4;
+        int rc = Math.max(1, radiusChunks);
+        int minSectionY = serverLevel.getMinBuildHeight() >> 5;
+        int maxSectionYExclusive = (serverLevel.getMaxBuildHeight() + 31) >> 5;
+        StringBuilder out = new StringBuilder();
+        int missingSections = 0;
+        int listed = 0;
+        final int maxList = 64;
+        // Dedupe by voxy (vsx, vsz) — two adjacent chunks share one section, and
+        // acquireIfExists has an LRU side effect that turns a second probe of the
+        // same key into a non-null air shell.
+        java.util.HashSet<Long> seenXZ = new java.util.HashSet<>();
+        int vsxMin = (pcx - rc) >> 1;
+        int vsxMax = (pcx + rc) >> 1;
+        int vszMin = (pcz - rc) >> 1;
+        int vszMax = (pcz + rc) >> 1;
+        for (int vsx = vsxMin; vsx <= vsxMax; vsx++) {
+            for (int vsz = vszMin; vsz <= vszMax; vsz++) {
+                long xz = (((long) vsx) << 32) | (vsz & 0xFFFFFFFFL);
+                if (!seenXZ.add(xz)) continue;
+                boolean hasContent = false;
+                for (int vy = minSectionY; vy < maxSectionYExclusive; vy++) {
+                    long key = WorldEngine.getWorldSectionId(0, vsx, vy, vsz);
+                    var s = engine.acquireIfExists(key);
+                    if (s != null) {
+                        try {
+                            if (s.getNonEmptyBlockCount() > 0) {
+                                hasContent = true;
+                                break;
+                            }
+                        } finally {
+                            s.release();
+                        }
+                    }
+                }
+                if (!hasContent) {
+                    missingSections++;
+                    if (listed < maxList) {
+                        if (out.length() > 0) out.append(", ");
+                        // Report as the lower-left chunk of the section so users can
+                        // jump there with /tp.
+                        out.append("(").append(vsx * 2).append(",").append(vsz * 2).append(")");
+                        listed++;
+                    }
+                }
+            }
+        }
+        final int totalMissing = missingSections;
+        final int finalListed = listed;
+        final String preview = out.toString();
+        source.sendSuccess(() -> Component.literal(
+                "missing sections within " + rc + "ch of chunk(" + pcx + "," + pcz + "): " + totalMissing +
+                        (finalListed < totalMissing
+                                ? " (first " + finalListed + " chunk coords: " + preview + ", ...)"
+                                : ": " + preview)),
+                true);
+        return 1;
+    }
+
+    private static int reloadConfig(CommandSourceStack source) {
+        var cfg = VoxyServer.getServerConfig();
+        if (cfg == null) {
+            source.sendFailure(Component.literal("Server config not initialized"));
+            return 0;
+        }
+        boolean ok = cfg.reload();
+        if (ok) {
+            source.sendSuccess(() -> Component.literal(
+                    "voxy-server-config.json reloaded (debug_log_activated=" + cfg.debugLogActivated +
+                            ", log_ingest_skips=" + cfg.logIngestSkips +
+                            ", log_dirty_drain=" + cfg.logDirtyDrain +
+                            ", log_version_skips=" + cfg.logVersionSkips +
+                            ", log_latency=" + cfg.logLatency + ")"),
+                    true);
+            return 1;
+        }
+        source.sendFailure(Component.literal("Failed to reload voxy-server-config.json (see server log)"));
+        return 0;
+    }
+
+    private static int checkSection(CommandSourceStack source, int lvl, int vx, int vy, int vz) {
+        if (!(source.getLevel() instanceof ServerLevel serverLevel)) {
+            source.sendFailure(Component.literal("This command must be run in a server world"));
+            return 0;
+        }
+        var instance = VoxyCommon.getInstance();
+        if (instance == null) {
+            source.sendFailure(Component.literal("VoxyCommon not initialized"));
+            return 0;
+        }
+        WorldIdentifier worldId = WorldIdentifier.of(serverLevel);
+        if (worldId == null) {
+            source.sendFailure(Component.literal("No WorldIdentifier"));
+            return 0;
+        }
+        WorldEngine engine = instance.getNullable(worldId);
+        if (engine == null) {
+            source.sendFailure(Component.literal("No engine"));
+            return 0;
+        }
+        long key = WorldEngine.getWorldSectionId(lvl, vx, vy, vz);
+        var s = engine.acquireIfExists(key);
+        final String report;
+        if (s == null) {
+            report = "section " + lvl + "@[" + vx + "," + vy + "," + vz + "] NOT IN ENGINE";
+        } else {
+            try {
+                report = "section " + lvl + "@[" + vx + "," + vy + "," + vz + "]"
+                        + " blockCount=" + s.getNonEmptyBlockCount()
+                        + " childMask=0x" + Integer.toHexString(s.getNonEmptyChildren() & 0xFF)
+                        + " octantMask=0x" + Integer.toHexString(s.getIngestedOctantMask() & 0xFF)
+                        + " version=" + s.getVersion();
+            } finally {
+                s.release();
+            }
+        }
         source.sendSuccess(() -> Component.literal(report), true);
         return 1;
     }

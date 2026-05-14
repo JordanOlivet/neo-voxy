@@ -10,6 +10,11 @@ import me.cortex.voxy.common.world.other.Mapper;
 public class SaveLoadSystem3 {
     public static final int STORAGE_VERSION = 0;
 
+    // Bit 24 of the 8-byte metadata word indicates that an 8-byte section version
+    // is appended after the LUT. Older saves don't have this bit and are loaded
+    // with whatever version primeForReuse() seeded.
+    private static final long META_BIT_HAS_VERSION = 1L << 24;
+
     private record SerializationCache(Long2ShortOpenHashMap lutMapCache, MemoryBuffer memoryBuffer) {
         public SerializationCache() {
             this(new Long2ShortOpenHashMap(1024), ThreadLocalMemoryBuffer
@@ -74,10 +79,16 @@ public class SaveLoadSystem3 {
         long metadata = 0;
         metadata |= Integer.toUnsignedLong(LUT.size());// Bottom 2 bytes
         metadata |= Byte.toUnsignedLong(section.getNonEmptyChildren()) << 16;// Next byte
-        // 5 bytes free
+        metadata |= META_BIT_HAS_VERSION; // Bit 24: signals appended 8-byte version
+        // 4.875 bytes free
 
         UnsafeUtil.memPutLong(metadataPtr, metadata);
         // TODO: do hash
+
+        // Append the persisted section version after the LUT so reloads from disk
+        // preserve the streaming-dedup counter across LRU eviction.
+        UnsafeUtil.memPutLong(ptr, section.getVersion());
+        ptr += 8;
 
         // TODO: rework the storage system to not need to do useless copies like this
         // (this is an issue for serialization, deserialization has solved this already)
@@ -120,6 +131,17 @@ public class SaveLoadSystem3 {
             }
         }
         ptr = lutBasePtr + (metadata & 0xFFFF) * 8L;
+
+        // If the save carries a persisted section version (META_BIT_HAS_VERSION),
+        // restore it so the streaming layer's per-key lastSentVersion stays valid
+        // across LRU eviction + reload. Older saves omit this and keep the
+        // primeForReuse() seed.
+        if ((metadata & META_BIT_HAS_VERSION) != 0
+                && (ptr - data.address) + 8 <= data.size) {
+            section._unsafeSetVersion(UnsafeUtil.memGetLong(ptr));
+            ptr += 8;
+        }
+
         section._unsafeSetFullyIngested();
         return true;
     }

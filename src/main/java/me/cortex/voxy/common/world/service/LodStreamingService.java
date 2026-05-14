@@ -70,6 +70,14 @@ public class LodStreamingService implements AutoCloseable {
     private final LinkedHashMap<Long, CachedSection> serializedCache;
     private final Object cacheLock = new Object();
 
+    // Optional dev-only instrumentation: timestamp at which a section first
+    // became dirty after a clean state (i.e. its corresponding chunk's ingest
+    // finished). Cleared by maybeQueueSection when the section is handed off
+    // to the serializer. Populated only when {@code config.logLatency} is on.
+    private final it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap firstDirtyNanos =
+            new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap();
+    private final Object firstDirtyNanosLock = new Object();
+
     private WorldEngine.ISectionChangeCallback prevDirtyCallback;
 
     public LodStreamingService(WorldEngine worldEngine, ServerLevel level) {
@@ -233,7 +241,19 @@ public class LodStreamingService implements AutoCloseable {
         this.prevDirtyCallback = null; // No-op chain target; server has no render-side listener.
         worldEngine.setDirtyCallback((section, flags, neighborMsk) -> {
             try {
-                onSectionDirty(section.key);
+                long key = section.key;
+                onSectionDirty(key);
+                // Event-driven fast-path: skip the dirty-queue + tick-drain wait for
+                // sections that are already within streaming range of a connected
+                // player. The slow path (drain) still runs and will simply find the
+                // section already marked sent (lastSentVersion bumped here) when it
+                // gets to it — no double send.
+                if (isActive.get() && !playerStates.isEmpty()) {
+                    long version = section.getVersion();
+                    for (PlayerStreamingState state : playerStates.values()) {
+                        tryFastPush(state, section, key, version);
+                    }
+                }
             } catch (Throwable t) {
                 Logger.error("Dirty callback failure", t);
             }
@@ -243,6 +263,78 @@ public class LodStreamingService implements AutoCloseable {
         });
     }
 
+    /**
+     * Fast-path companion to {@link #maybeQueueSection}: called inline from the
+     * dirty callback when an ingest just wrote a section. Skips the dirty queue
+     * + tick drain entirely if the section is already within the player's
+     * streaming radius. The section is passed in by reference (the markDirty
+     * caller holds a ref); we take our own extra ref for the async worker.
+     */
+    private void tryFastPush(PlayerStreamingState state, WorldSection section, long key, long version) {
+        if (state.player == null
+                || state.lastPlayerSectionX == Integer.MIN_VALUE
+                || state.clientCacheFilter == null) {
+            return;
+        }
+        int lvl = WorldEngine.getLevel(key);
+        int sx = WorldEngine.getX(key);
+        int sz = WorldEngine.getZ(key);
+        // Same scale fix as drainDirtyNear: lift player coords + radius into the
+        // key's LOD-N space before comparing. Without this every LOD-N>0 update
+        // (parent mask changes) is silently dropped here too.
+        int pxLod = state.lastPlayerSectionX >> lvl;
+        int pzLod = state.lastPlayerSectionZ >> lvl;
+        int radLod = Math.max(1, effectiveRadius(state) >> lvl);
+        int dx = Math.abs(sx - pxLod);
+        int dz = Math.abs(sz - pzLod);
+        if (Math.max(dx, dz) > radLod) {
+            return;
+        }
+        boolean hasContent = (lvl == 0)
+                ? section.getNonEmptyBlockCount() > 0
+                : section.getNonEmptyChildren() != 0;
+        if (!hasContent) {
+            return;
+        }
+        Long lastSent = state.lastSentVersion.get(key);
+        if (lastSent != null && lastSent >= version) {
+            return;
+        }
+        state.lastSentVersion.put(key, version);
+        state.clientCacheFilter.add(key);
+
+        if (config.isLogLatencyEffective()) {
+            long firstNanos;
+            synchronized (firstDirtyNanosLock) {
+                firstNanos = firstDirtyNanos.remove(key);
+            }
+            if (firstNanos != 0L) {
+                long elapsedMs = (System.nanoTime() - firstNanos) / 1_000_000L;
+                Logger.info("[VoxyLatency] fast-push dirty→queued key=" + WorldEngine.pprintPos(key) +
+                        " elapsedMs=" + elapsedMs);
+            }
+        }
+
+        section.acquire();
+        final WorldSection capturedSection = section;
+        try {
+            serializeExecutor.execute(() -> {
+                try {
+                    byte[] data = lookupOrSerialize(capturedSection, version);
+                    if (data != null) {
+                        state.sender.queueSection(data, (int) key);
+                    }
+                } catch (Throwable t) {
+                    Logger.error("fast-push serialize failed for " + WorldEngine.pprintPos(key), t);
+                } finally {
+                    capturedSection.release();
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException rex) {
+            capturedSection.release();
+        }
+    }
+
     private void onSectionDirty(long key) {
         synchronized (dirtyLock) {
             int cap = Math.max(256, config.dirtyQueueMaxEntries);
@@ -250,6 +342,14 @@ public class LodStreamingService implements AutoCloseable {
                 recentlyDirtyKeys.pollFirst();
             }
             recentlyDirtyKeys.addLast(key);
+        }
+        if (config.isLogLatencyEffective()) {
+            long now = System.nanoTime();
+            synchronized (firstDirtyNanosLock) {
+                if (!firstDirtyNanos.containsKey(key)) {
+                    firstDirtyNanos.put(key, now);
+                }
+            }
         }
     }
 
@@ -279,6 +379,32 @@ public class LodStreamingService implements AutoCloseable {
         if (state != null) {
             state.clientDesiredRate = desiredRate;
         }
+    }
+
+    public void handleClientHint(ServerPlayer player, VoxyPacketPayload payload) {
+        int radiusChunks = payload.parseClientHintRadiusChunks();
+        if (radiusChunks <= 0) {
+            return;
+        }
+        // Convert chunks (16 blocks) to voxy sections (32 blocks). Round up so a
+        // partially-covered ring at the boundary still streams.
+        int radiusSections = (radiusChunks + 1) / 2;
+        PlayerStreamingState state = playerStates.get(player.getUUID());
+        if (state == null) {
+            return;
+        }
+        int previous = state.clientHintedRadius;
+        state.clientHintedRadius = radiusSections;
+        // Cold scan should restart from ring 0 so newly-in-range sections (after a
+        // hint increase) get streamed promptly. Setting consecutiveEmptyRings=0
+        // lets the regular tickPlayer guard flip out of maintenance and reschedule
+        // at the fast cadence on its own — no direct mutation of inMaintenance.
+        if (radiusSections > previous) {
+            state.currentRing = 0;
+            state.consecutiveEmptyRings = 0;
+        }
+        Logger.info("[VoxyStream] " + player.getName().getString() +
+                " client hint = " + radiusChunks + " chunks (" + radiusSections + " sections)");
     }
 
     @Deprecated
@@ -325,7 +451,7 @@ public class LodStreamingService implements AutoCloseable {
                 0L, periodMs, TimeUnit.MILLISECONDS);
 
         Logger.info("Server-driven streaming enabled for " + player.getName().getString() +
-                " (tick=" + periodMs + "ms, radius=" + effectiveRadius(state) + ")");
+                " (tick=" + periodMs + "ms, radius=" + (effectiveRadius(state) * 2) + " chunks)");
     }
 
     private void sendMapperSync(ServerPlayer player) {
@@ -486,11 +612,20 @@ public class LodStreamingService implements AutoCloseable {
         int flushed = 0;
         int outOfRange = 0;
         for (Long key : snap) {
+            // LOD-N section coords are in LOD-N's own scale; lift the player
+            // coords + radius into the same scale before doing the chebyshev
+            // check. Without this LOD-1+ keys at the player's actual location
+            // appear as out-of-range and never get streamed, leaving parent
+            // mip mask stale on the client.
+            int lvl = WorldEngine.getLevel(key);
             int sx = WorldEngine.getX(key);
             int sz = WorldEngine.getZ(key);
-            int dx = Math.abs(sx - px);
-            int dz = Math.abs(sz - pz);
-            if (Math.max(dx, dz) > radius) {
+            int pxLod = px >> lvl;
+            int pzLod = pz >> lvl;
+            int radLod = Math.max(1, radius >> lvl);
+            int dx = Math.abs(sx - pxLod);
+            int dz = Math.abs(sz - pzLod);
+            if (Math.max(dx, dz) > radLod) {
                 outOfRange++;
                 continue;
             }
@@ -498,7 +633,7 @@ public class LodStreamingService implements AutoCloseable {
                 flushed++;
             }
         }
-        if (snap.size() >= 64 || flushed > 0) {
+        if (config.isLogDirtyDrainEffective() && (snap.size() >= 64 || flushed > 0)) {
             Logger.info("[VoxyStream] " + state.player.getName().getString() +
                     " drained " + snap.size() + " dirty keys @ section(" + px + "," + pz +
                     ") r=" + radius + " → flushed=" + flushed + " out-of-range=" + outOfRange);
@@ -511,6 +646,11 @@ public class LodStreamingService implements AutoCloseable {
             return 0;
         }
         int found = 0;
+        // Ring iterates at LOD-0 scale around the player. For each LOD-0 coord on
+        // this ring, also visit the LOD-N section that physically covers it (key
+        // is shared by 4^N LOD-0 coords). Dedupe via a small per-ring Set so the
+        // same LOD-N key isn't checked 4^N times.
+        java.util.HashSet<Long> seen = new java.util.HashSet<>();
         for (int dx = -ring; dx <= ring; dx++) {
             for (int dz = -ring; dz <= ring; dz++) {
                 if (ring > 0 && Math.abs(dx) != ring && Math.abs(dz) != ring) {
@@ -519,8 +659,13 @@ public class LodStreamingService implements AutoCloseable {
                 int sectionX = px + dx;
                 int sectionZ = pz + dz;
                 for (int lvl = WorldEngine.MAX_LOD_LAYER; lvl >= 0; lvl--) {
+                    int sx = sectionX >> lvl;
+                    int sz = sectionZ >> lvl;
                     for (int y = minSectionY; y < maxSectionYExclusive; y++) {
-                        long key = WorldEngine.getWorldSectionId(lvl, sectionX, y, sectionZ);
+                        long key = WorldEngine.getWorldSectionId(lvl, sx, y, sz);
+                        if (!seen.add(key)) {
+                            continue;
+                        }
                         if (maybeQueueSection(state, key)) {
                             found++;
                         }
@@ -539,6 +684,11 @@ public class LodStreamingService implements AutoCloseable {
      * thread so the scheduler tick does not block on CPU-heavy work).
      */
     private boolean maybeQueueSection(PlayerStreamingState state, long key) {
+        // A scheduled tick may still fire briefly after close() flipped the flag.
+        // Bail out before we touch the (possibly terminated) executor.
+        if (!isActive.get()) {
+            return false;
+        }
         WorldSection section = worldEngine.acquireIfExists(key);
         if (section == null) {
             return false;
@@ -558,7 +708,7 @@ public class LodStreamingService implements AutoCloseable {
             long version = section.getVersion();
             Long lastSent = state.lastSentVersion.get(key);
             if (lastSent != null && lastSent >= version) {
-                if (config.logVersionSkips) {
+                if (config.isLogVersionSkipsEffective()) {
                     Logger.info("[VoxyVersion] skip key=" + WorldEngine.pprintPos(key) +
                             " lastSent=" + lastSent + " current=" + version +
                             " nonEmptyBlocks=" + section.getNonEmptyBlockCount() +
@@ -574,23 +724,43 @@ public class LodStreamingService implements AutoCloseable {
             state.lastSentVersion.put(key, version);
             state.clientCacheFilter.add(key);
 
+            if (config.isLogLatencyEffective()) {
+                long firstNanos;
+                synchronized (firstDirtyNanosLock) {
+                    firstNanos = firstDirtyNanos.remove(key);
+                }
+                if (firstNanos != 0L) {
+                    long elapsedMs = (System.nanoTime() - firstNanos) / 1_000_000L;
+                    Logger.info("[VoxyLatency] dirty→queued key=" + WorldEngine.pprintPos(key) +
+                            " elapsedMs=" + elapsedMs);
+                }
+            }
+
             // Hand off the CPU-heavy work to the worker pool. The section ref
             // count must be kept while the worker reads section data, so we
             // acquire once more and let the worker release.
             section.acquire();
             final WorldSection capturedSection = section;
-            serializeExecutor.execute(() -> {
-                try {
-                    byte[] data = lookupOrSerialize(capturedSection, version);
-                    if (data != null) {
-                        state.sender.queueSection(data, (int) key);
+            try {
+                serializeExecutor.execute(() -> {
+                    try {
+                        byte[] data = lookupOrSerialize(capturedSection, version);
+                        if (data != null) {
+                            state.sender.queueSection(data, (int) key);
+                        }
+                    } catch (Throwable t) {
+                        Logger.error("async serialize failed for " + WorldEngine.pprintPos(key), t);
+                    } finally {
+                        capturedSection.release();
                     }
-                } catch (Throwable t) {
-                    Logger.error("async serialize failed for " + WorldEngine.pprintPos(key), t);
-                } finally {
-                    capturedSection.release();
-                }
-            });
+                });
+            } catch (java.util.concurrent.RejectedExecutionException rex) {
+                // Pool already terminated (server shutdown raced the scheduler).
+                // Hand the extra ref back ourselves so WorldEngine.free() doesn't
+                // strand this section.
+                capturedSection.release();
+                return false;
+            }
             return true;
         } finally {
             // Always release the ref obtained by acquireIfExists. If we forked
@@ -787,9 +957,36 @@ public class LodStreamingService implements AutoCloseable {
 
     @Override
     public void close() {
+        // Mark inactive first so any in-flight tickPlayer / dirty-callback fast
+        // path bails out before it touches the executors.
         isActive.set(false);
-        scheduler.shutdown();
+
+        // Stop scheduling new player ticks. shutdownNow cancels pending tasks
+        // and signals running ones to wrap up. The 1-second wait gives any tick
+        // currently executing time to return, which would otherwise still call
+        // serializeExecutor.execute and trip the RejectedExecutionException
+        // path while we shut the pool below.
+        scheduler.shutdownNow();
+        try {
+            if (!scheduler.awaitTermination(1, TimeUnit.SECONDS)) {
+                Logger.warn("scheduler did not terminate within 1s on close()");
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+
+        // Only now is it safe to shut the serialize pool down — no more tasks
+        // can be submitted to it because the only submitters (tickPlayer + the
+        // dirty fast-path) are gated on the active flag we just cleared.
         serializeExecutor.shutdown();
+        try {
+            if (!serializeExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
+                Logger.warn("serializeExecutor did not terminate within 2s on close()");
+                serializeExecutor.shutdownNow();
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
 
         for (PlayerStreamingState state : playerStates.values()) {
             cancel(state);
@@ -802,6 +999,9 @@ public class LodStreamingService implements AutoCloseable {
         }
         synchronized (dirtyLock) {
             recentlyDirtyKeys.clear();
+        }
+        synchronized (firstDirtyNanosLock) {
+            firstDirtyNanos.clear();
         }
 
         try {

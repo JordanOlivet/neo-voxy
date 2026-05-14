@@ -356,6 +356,16 @@ public final class WorldSection {
         return ((long) VERSION_HANDLE.getAndAdd(this, 1L)) + 1L;
     }
 
+    /**
+     * Restore a previously-persisted version. Only used by {@link SaveLoadSystem3}
+     * right after a disk load: the section's data is being replaced wholesale so
+     * the {@code primeForReuse()} seed is irrelevant, and we want clients to see
+     * "same content ⇒ same version" across LRU eviction and reload.
+     */
+    void _unsafeSetVersion(long v) {
+        VERSION_HANDLE.set(this, v);
+    }
+
     public boolean setNotDirty() {
         return (boolean) IS_DIRTY_HANDLE.getAndSet(this, false);
     }

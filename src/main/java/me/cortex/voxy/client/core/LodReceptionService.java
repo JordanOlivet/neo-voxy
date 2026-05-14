@@ -85,11 +85,19 @@ public class LodReceptionService implements AutoCloseable {
         this.modelBakery = modelBakery;
         this.congestionControl = new ClientCongestionControl(this::onRateUpdate);
 
-        this.processingExecutor = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "VoxyLodReception");
+        // Small pool so deserialize + applyVoxelData on incoming sections can run
+        // in parallel. Concurrent writes only happen if the same section key gets
+        // streamed twice in quick succession; the server-side dedup
+        // ({@code lastSentVersion}) keeps that rare, and when it does happen both
+        // packets carry the same bytes so last-write-wins is benign.
+        int workers = Math.max(2, Runtime.getRuntime().availableProcessors() / 4);
+        java.util.concurrent.atomic.AtomicInteger idx = new java.util.concurrent.atomic.AtomicInteger();
+        this.processingExecutor = Executors.newFixedThreadPool(workers, r -> {
+            Thread t = new Thread(r, "VoxyLodReception-" + idx.getAndIncrement());
             t.setDaemon(true);
             return t;
         });
+        Logger.info("LodReceptionService processing pool: " + workers + " workers");
 
         // Register client message handler
         VoxyNetworkHandler.setClientMessageHandler(this::handleServerMessage);
@@ -155,6 +163,10 @@ public class LodReceptionService implements AutoCloseable {
                 Logger.warn("Initial sync request not delivered — falling back to client-local ingest");
                 localMode = true;
                 mapperReady = true;
+            } else {
+                // Push our render distance so the server clamps its streaming radius
+                // to what we'll actually display.
+                VoxyNetworkHandler.sendClientHint();
             }
         }
 

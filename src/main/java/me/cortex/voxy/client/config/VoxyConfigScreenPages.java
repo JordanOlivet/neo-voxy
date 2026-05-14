@@ -150,6 +150,8 @@ public abstract class VoxyConfigScreenPages {
                                     vrs.setRenderDistance(v);
                                 }
                             }
+                            // Inform the server so it can clamp its streaming radius.
+                            me.cortex.voxy.common.network.VoxyNetworkHandler.sendClientHint();
                         }, s -> s.sectionRenderDistance)
                         .setImpact(OptionImpact.LOW)
                         .build())
@@ -171,6 +173,12 @@ public abstract class VoxyConfigScreenPages {
                         .setTooltip(Component.translatable("voxy.config.general.debug_dump_on_screenshot.tooltip"))
                         .setControl(TickBoxControl::new)
                         .setBinding((s, v) -> s.debugDumpOnScreenshot = v, s -> s.debugDumpOnScreenshot)
+                        .build())
+                .add(OptionImpl.createBuilder(boolean.class, storage)
+                        .setName(Component.translatable("voxy.config.general.log_gap_diag"))
+                        .setTooltip(Component.translatable("voxy.config.general.log_gap_diag.tooltip"))
+                        .setControl(TickBoxControl::new)
+                        .setBinding((s, v) -> s.logGapDiag = v, s -> s.logGapDiag)
                         .build())
                 .build());
         return new OptionPage(Component.translatable("voxy.config.title"), ImmutableList.copyOf(groups));

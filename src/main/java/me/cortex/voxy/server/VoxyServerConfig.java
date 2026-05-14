@@ -60,11 +60,29 @@ public class VoxyServerConfig {
     public int serializedCacheEntries = 4096;
 
     /**
+     * Master switch for every debug log this mod emits on the server. When
+     * {@code false}, all per-feature debug flags ({@link #logIngestSkips},
+     * {@link #logVersionSkips}, {@link #logLatency}, the dirty-drain summary,
+     * the retry sweep heartbeat, …) are ignored and silent regardless of their
+     * own value. Set to {@code true} to allow the per-feature flags to decide.
+     */
+    public boolean debugLogActivated = false;
+
+    /**
      * When {@code true}, log every {@code ChunkEvent.Load} that gets skipped by
      * Voxy (proto-chunk, no lighting, ingest disabled, ...). Verbose — use only
-     * to diagnose missing LODs.
+     * to diagnose missing LODs. Honored only when {@link #debugLogActivated}
+     * is also {@code true}.
      */
     public boolean logIngestSkips = false;
+
+    /**
+     * When {@code true}, log the dirty-drain summary that the LOD streaming
+     * service emits each time it drains pending sections for a player
+     * ("drained N dirty keys ... flushed=X out-of-range=Y"). Honored only when
+     * {@link #debugLogActivated} is also {@code true}.
+     */
+    public boolean logDirtyDrain = false;
 
     /**
      * Interval (seconds) for the auto-regen watchdog. Periodically iterates the
@@ -110,6 +128,14 @@ public class VoxyServerConfig {
      */
     public int dirtyDrainMaxPerTick = 4096;
 
+    /**
+     * When {@code true}, log the wall-clock time elapsed between a section first
+     * becoming dirty (chunk ingest finished) and the moment the streamer queues
+     * it for transmission to a player. Useful to measure the effect of the
+     * event-driven push optimisations.
+     */
+    public boolean logLatency = false;
+
     private transient Path configPath;
 
     public static VoxyServerConfig load(Path serverRoot) {
@@ -148,12 +174,15 @@ public class VoxyServerConfig {
             }
             this.maxStreamingRadiusChunks = fresh.maxStreamingRadiusChunks;
             this.clientHintRadiusCapChunks = fresh.clientHintRadiusCapChunks;
+            this.debugLogActivated = fresh.debugLogActivated;
             this.logIngestSkips = fresh.logIngestSkips;
+            this.logDirtyDrain = fresh.logDirtyDrain;
             this.autoRegenIntervalSeconds = fresh.autoRegenIntervalSeconds;
             this.autoRegenRadiusChunks = fresh.autoRegenRadiusChunks;
             this.autoResyncOnJumpChunks = fresh.autoResyncOnJumpChunks;
             this.logVersionSkips = fresh.logVersionSkips;
             this.dirtyDrainMaxPerTick = fresh.dirtyDrainMaxPerTick;
+            this.logLatency = fresh.logLatency;
             this.perPlayerLimitKBps = fresh.perPlayerLimitKBps;
             this.globalLimitKBps = fresh.globalLimitKBps;
             this.serializeThreads = fresh.serializeThreads;
@@ -166,6 +195,27 @@ public class VoxyServerConfig {
             Logger.error("Failed to reload voxy-server-config.json", e);
             return false;
         }
+    }
+
+    // ===== Effective-flag helpers (master switch gate) ============================
+    // Each per-feature debug flag must AND with debugLogActivated. Call these
+    // wherever code currently reads the raw field. Keeps individual config
+    // semantics intact while the master switch can silence everything.
+
+    public boolean isLogIngestSkipsEffective() {
+        return debugLogActivated && logIngestSkips;
+    }
+
+    public boolean isLogVersionSkipsEffective() {
+        return debugLogActivated && logVersionSkips;
+    }
+
+    public boolean isLogLatencyEffective() {
+        return debugLogActivated && logLatency;
+    }
+
+    public boolean isLogDirtyDrainEffective() {
+        return debugLogActivated && logDirtyDrain;
     }
 
     public int effectiveSerializeThreads() {

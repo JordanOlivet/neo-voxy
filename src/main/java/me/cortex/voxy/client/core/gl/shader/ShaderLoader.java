@@ -8,11 +8,26 @@ import java.nio.charset.StandardCharsets;
 
 public class ShaderLoader {
     /**
+     * Shader sources resolved via {@link Class#getResourceAsStream} sometimes
+     * become unreachable after a disconnect/reconnect cycle on NeoForge — the
+     * modular classloader appears to invalidate resource URLs across module
+     * relifecycle. Caching successful loads keeps the second session alive even
+     * when {@code getResourceAsStream} starts returning {@code null}.
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<String, String> SOURCE_CACHE =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
      * Load shader source from Voxy's classpath.
      * This is necessary on NeoForge because Sodium's ShaderLoader uses its own
      * classloader which cannot access Voxy's resources due to module isolation.
      */
     private static String loadShaderSource(String id) {
+        String cached = SOURCE_CACHE.get(id);
+        if (cached != null) {
+            return cached;
+        }
+
         String ns = id.split(":")[0];
         String path = id.split(":")[1];
         String resourcePath = "/assets/" + ns + "/shaders/" + path;
@@ -21,7 +36,9 @@ public class ShaderLoader {
             if (stream == null) {
                 throw new RuntimeException("Shader not found: " + resourcePath);
             }
-            return IOUtils.toString(stream, StandardCharsets.UTF_8);
+            String src = IOUtils.toString(stream, StandardCharsets.UTF_8);
+            SOURCE_CACHE.put(id, src);
+            return src;
         } catch (IOException e) {
             throw new RuntimeException("Failed to load shader: " + resourcePath, e);
         }

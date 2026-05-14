@@ -38,6 +38,7 @@ public record VoxyPacketPayload(byte messageType, byte[] data) implements Custom
     public static final byte MSG_SYNC_REQUEST = 6; // Client→Server: request LOD sync
     public static final byte MSG_SYNC_COMPLETE = 7; // Server→Client: signals streaming complete
     public static final byte MSG_REQUEST_SECTIONS = 8; // Client→Server: request specific sections (pull model)
+    public static final byte MSG_CLIENT_HINT = 9; // Client→Server: desired streaming radius in vanilla chunks
 
     @NotNull
     @Override
@@ -108,6 +109,31 @@ public record VoxyPacketPayload(byte messageType, byte[] data) implements Custom
         data[2] = (byte) (desiredRateKBps >> 8);
         data[3] = (byte) desiredRateKBps;
         return new VoxyPacketPayload(MSG_RATE_UPDATE, data);
+    }
+
+    /**
+     * Helper to create a client streaming-radius hint payload.
+     *
+     * @param radiusChunks Desired streaming radius in vanilla chunks (16-block units).
+     */
+    public static VoxyPacketPayload clientHint(int radiusChunks) {
+        byte[] data = new byte[4];
+        data[0] = (byte) (radiusChunks >> 24);
+        data[1] = (byte) (radiusChunks >> 16);
+        data[2] = (byte) (radiusChunks >> 8);
+        data[3] = (byte) radiusChunks;
+        return new VoxyPacketPayload(MSG_CLIENT_HINT, data);
+    }
+
+    /**
+     * Parse streaming-radius hint (in vanilla chunks) from a client-hint payload.
+     */
+    public int parseClientHintRadiusChunks() {
+        if (messageType != MSG_CLIENT_HINT || data.length < 4) {
+            return 0;
+        }
+        return ((data[0] & 0xFF) << 24) | ((data[1] & 0xFF) << 16) |
+                ((data[2] & 0xFF) << 8) | (data[3] & 0xFF);
     }
 
     /**

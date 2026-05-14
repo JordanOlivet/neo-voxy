@@ -28,6 +28,16 @@ public class RenderGenerationService {
     public static final AtomicInteger MESH_FAILED_COUNTER = new AtomicInteger();
     private static final AtomicInteger COUNTER = new AtomicInteger();
 
+    // Set by callers (AsyncNodeManager.worldEvent) right before they fan out
+    // enqueueTask calls for a freshly-arrived section. The flag lets the task
+    // jump the priority queue ahead of background ring-expansion tasks of the
+    // same LOD level, so live updates land on screen first.
+    private static final ThreadLocal<Boolean> FRESH = ThreadLocal.withInitial(() -> Boolean.FALSE);
+
+    public static void setFresh(boolean fresh) {
+        FRESH.set(fresh);
+    }
+
     private static final class BuildTask {
         WorldSection section;
         final long position;
@@ -36,6 +46,7 @@ public class RenderGenerationService {
         int attempts;
         int addin;
         long priority = Long.MIN_VALUE;
+        boolean fresh;
 
         private BuildTask(long position) {
             this.position = position;
@@ -55,7 +66,12 @@ public class RenderGenerationService {
 
     private final AtomicInteger taskQueueCount = new AtomicInteger();
     private final PriorityBlockingQueue<BuildTask> taskQueue = new PriorityBlockingQueue<>(5000,
-            (a, b) -> Long.compareUnsigned(a.priority, b.priority));
+            (a, b) -> {
+                // Freshly-streamed sections jump ahead of background ring fill.
+                int freshCmp = Boolean.compare(b.fresh, a.fresh);
+                if (freshCmp != 0) return freshCmp;
+                return Long.compareUnsigned(a.priority, b.priority);
+            });
     private final StampedLock taskMapLock = new StampedLock();
     private final Long2ObjectOpenHashMap<BuildTask> taskMap = new Long2ObjectOpenHashMap<>(5000);
 
@@ -163,7 +179,8 @@ public class RenderGenerationService {
         }
 
         if (section == null) {
-            if (WorldEngine.getLevel(task.position) <= 1) {
+            if (me.cortex.voxy.client.config.VoxyConfig.CONFIG.logGapDiag
+                    && WorldEngine.getLevel(task.position) <= 1) {
                 Logger.info("[GAP-DIAG] null section at " + WorldEngine.pprintPos(task.position));
             }
             if (this.resultConsumer != null) {
@@ -293,7 +310,8 @@ public class RenderGenerationService {
         }
 
         if (mesh != null) {// If the mesh is null it means it didnt finish, so dont submit
-            if (WorldEngine.getLevel(task.position) <= 1) {
+            if (me.cortex.voxy.client.config.VoxyConfig.CONFIG.logGapDiag
+                    && WorldEngine.getLevel(task.position) <= 1) {
                 Logger.info("[GAP-DIAG] mesh " + WorldEngine.pprintPos(task.position)
                         + " empty=" + mesh.isEmpty()
                         + " children=0x" + Integer.toHexString(Byte.toUnsignedInt(mesh.childExistence))
@@ -313,9 +331,12 @@ public class RenderGenerationService {
         }
         boolean[] isOurs = new boolean[1];
         long stamp = this.taskMapLock.writeLock();
+        boolean wantFresh = FRESH.get();
         BuildTask task = this.taskMap.computeIfAbsent(pos, p -> {
             isOurs[0] = true;
-            return new BuildTask(p);
+            BuildTask t = new BuildTask(p);
+            t.fresh = wantFresh;
+            return t;
         });
         this.taskMapLock.unlockWrite(stamp);
 

@@ -36,6 +36,8 @@
   "voxy.config.general.render_statistics.tooltip": "Displays Voxy's render-side counters (sections drawn, geometry size, GPU memory) on the F3 debug overlay.",
   "voxy.config.general.debug_dump_on_screenshot": "Debug Dump On Screenshot",
   "voxy.config.general.debug_dump_on_screenshot.tooltip": "When taking a screenshot (F2), also writes a sidecar .txt file next to the PNG containing player position, Voxy state, render stats, Iris/Sodium info, GL info and tail log. Useful when reporting visual bugs.",
+  "voxy.config.general.log_gap_diag": "Log Mesh Gap Diagnostics",
+  "voxy.config.general.log_gap_diag.tooltip": "Logs [GAP-DIAG] lines for every LOD-0/1 mesh build (null section, empty mesh, geometry size). Very chatty — only enable when investigating visible LOD holes/gaps.",
   "voxy.config.general.nvmesh": "Use nvidia mesh shaders",
   "voxy.config.general.nvmesh.tooltip": "Use nvidia mesh shaders if possible to render LoDs",
 

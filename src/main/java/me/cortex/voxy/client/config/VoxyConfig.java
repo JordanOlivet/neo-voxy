@@ -49,6 +49,7 @@ public class VoxyConfig implements OptionStorage<VoxyConfig> {
     public boolean renderStatistics = false;
     public boolean dontUseSodiumBuilderThreads = false;
     public boolean debugDumpOnScreenshot = false;
+    public boolean logGapDiag = false;
     public SSAO.SSAOMode ssaoMode = SSAO.SSAOMode.AUTO;
 
     private static VoxyConfig loadOrCreate() {

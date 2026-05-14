@@ -175,6 +175,16 @@ public class VoxyNetworkHandler {
     }
 
     /**
+     * Push the local Voxy render-distance to the server so it can clamp its
+     * streaming radius accordingly. Safe to call when no server channel is
+     * negotiated — it returns {@code false} silently.
+     */
+    public static boolean sendClientHint() {
+        int chunks = Math.max(1, VoxyConfig.CONFIG.sectionRenderDistance) * 32;
+        return sendToServer(VoxyPacketPayload.clientHint(chunks));
+    }
+
+    /**
      * Resolve the effective multiplayer mode after considering server capability.
      * <ul>
      * <li>{@code AUTO} → {@code SERVER_STREAM} if server has the mod, else {@code CLIENT_ONLY}.</li>
