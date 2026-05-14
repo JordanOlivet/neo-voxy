@@ -45,17 +45,6 @@ public final class WorldSection {
     private static final AtomicInteger ARRAY_REUSE_CACHE_COUNT = new AtomicInteger(0);
     private static final ConcurrentLinkedDeque<long[]> ARRAY_REUSE_CACHE = new ConcurrentLinkedDeque<>();
 
-    // Process-wide monotonic counter used to seed each {@link WorldSection#version}
-    // so a section reloaded from disk (or popped from the LRU and reused) always
-    // gets a version that is strictly greater than any value it may have had in a
-    // previous incarnation. The streaming layer compares per-player {@code
-    // lastSentVersion} against this counter to decide whether a section has
-    // changed since the last broadcast; without a unique seed per allocation, a
-    // disk-loaded section would start at {@code 0} and look "older than what we
-    // already sent" to the streamer, which silently dropped the resend.
-    private static final java.util.concurrent.atomic.AtomicLong GLOBAL_VERSION_SEED =
-            new java.util.concurrent.atomic.AtomicLong(1L);
-
 
     public final int lvl;
     public final int x;
@@ -104,17 +93,43 @@ public final class WorldSection {
         } else {
             ARRAY_REUSE_CACHE_COUNT.decrementAndGet();
         }
-        // Seed version from the process-wide counter so disk-loaded / freshly
-        // allocated sections never look "older than already sent" to the streamer.
-        this.version = GLOBAL_VERSION_SEED.incrementAndGet();
+        // version is left at its declared default (0). Previously this
+        // constructor seeded it from a process-wide monotonic counter
+        // (GLOBAL_VERSION_SEED) on the theory that "freshly allocated sections
+        // never look older than already sent to the streamer". That was wrong
+        // in steady state: under bandwidth pressure the LRU secondary cache
+        // (capacity ~1024) cycles sections in and out faster than the async
+        // save service can persist them; an evicted-then-reloaded section
+        // would land here with a fresh, monotonically-larger version even
+        // though its voxel data was identical to the copy the streamer
+        // already sent the player, and the streamer's lastSent-vs-version
+        // check would happily resend it. With this constructor at 0, a clean
+        // reload from disk goes through {@link SaveLoadSystem3#deserialize}
+        // which calls {@link #_unsafeSetVersion(long)} to restore whatever
+        // version was persisted (the on-disk format has carried
+        // {@code META_BIT_HAS_VERSION} since the streaming layer was added,
+        // so all saves include it), and an unsaved-yet-reloaded section
+        // stays at 0 — strictly less than any value the streamer has already
+        // recorded in {@code lastSentVersion}, so the version-check correctly
+        // suppresses the redundant resend.
     }
 
     void primeForReuse() {
         ATOMIC_STATE_HANDLE.set(this, 1);
-        // Section was pulled out of the LRU secondary cache and is about to be
-        // populated again — give it a fresh version so the streamer treats it as
-        // a new payload candidate for every client.
-        VERSION_HANDLE.set(this, GLOBAL_VERSION_SEED.incrementAndGet());
+        // Previously this also bumped the version via GLOBAL_VERSION_SEED, on the
+        // theory that the section was about to be "populated again" by the
+        // ingest path. That was wrong: when a section is pulled back out of the
+        // LRU secondary cache it is the exact same {@link WorldSection} instance
+        // with the exact same voxel array — no overwrite happens here. Bumping
+        // the version anyway made the streamer treat every LRU recycle as a new
+        // payload, which on the active ring (~9.6k sections at radius 32ch)
+        // generated a steady ~1800-section-per-second resend storm forever after
+        // the initial sync finished. {@link WorldUpdater#insertUpdate} already
+        // calls {@code markDirty} (and therefore {@link #bumpVersion}) when the
+        // ingest pipeline actually writes new voxel data; that is the only
+        // path that should change the version, and the streamer's version
+        // gating now correctly settles into steady-state once a player's
+        // streaming ring is fully filled.
     }
 
     public long[] _unsafeGetRawDataArray() {

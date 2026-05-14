@@ -280,10 +280,36 @@ public class LodReceptionService implements AutoCloseable {
                 Logger.info("ID remapper built off-thread in " + ms + "ms");
                 VoxyDiag.event("remapperBuilt " + ms + "ms (off-thread)");
                 mapperReady = true;
+                prebakeFromMapper();
             } catch (Throwable t) {
                 Logger.error("Failed to build ID remapper", t);
             }
         });
+    }
+
+    /**
+     * Request a bake for every block state the server's mapper sync just
+     * registered in the client mapper. The curated pre-bake at world load is
+     * a best-effort warm-up (it runs before any sync arrives and only covers a
+     * vanilla-shaped subset of blocks); this pass guarantees exact coverage
+     * for whatever the server actually has — including blocks from mods only
+     * the server has loaded — and dedup'ing happens for free because
+     * {@link me.cortex.voxy.client.core.model.ModelBakerySubsystem#requestBlockBake(int)}
+     * returns {@code false} the second time it sees an id, so the curated
+     * pre-bake's warm-up bakes are not redone.
+     */
+    private void prebakeFromMapper() {
+        var entries = clientMapper.getStateEntries();
+        int requested = 0;
+        for (var entry : entries) {
+            if (entry == null) continue;
+            if (modelBakery.requestBlockBake(entry.id)) {
+                requested++;
+            }
+        }
+        Logger.info("Mapper-driven pre-bake: requested " + requested + " additional block states (of "
+                + entries.length + " in mapper)");
+        VoxyDiag.event("mapperPrebake requested=" + requested + " total=" + entries.length);
     }
 
     /**
