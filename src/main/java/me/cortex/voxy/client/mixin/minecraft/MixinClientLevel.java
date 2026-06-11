@@ -15,6 +15,7 @@ import net.minecraft.util.profiling.ProfilerFiller;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.dimension.DimensionType;
 
 import java.util.function.Supplier;
@@ -83,14 +84,19 @@ public abstract class MixinClientLevel {
                                                                           // boarder
             var csp = SectionPos.of(pos);
 
-            var section = self.getChunk(pos).getSection(csp.y() - this.bottomSectionY);
-            var lp = self.getLightEngine();
+            // Only ingest from an existing FULL chunk; getChunk(pos) could return a
+            // wrong/empty chunk during respawn or teleport transitions
+            var chunk = self.getChunk(pos.getX() >> 4, pos.getZ() >> 4, ChunkStatus.FULL, false);
+            if (chunk != null) {
+                var section = chunk.getSection(csp.y() - this.bottomSectionY);
+                var lp = self.getLightEngine();
 
-            var blp = lp.getLayerListener(LightLayer.BLOCK).getDataLayerData(csp);
-            var slp = lp.getLayerListener(LightLayer.SKY).getDataLayerData(csp);
+                var blp = lp.getLayerListener(LightLayer.BLOCK).getDataLayerData(csp);
+                var slp = lp.getLayerListener(LightLayer.SKY).getDataLayerData(csp);
 
-            VoxelIngestService.rawIngest(wi, section, csp.x(), csp.y(), csp.z(), blp == null ? null : blp.copy(),
-                    slp == null ? null : slp.copy());
+                VoxelIngestService.rawIngest(wi, section, csp.x(), csp.y(), csp.z(), blp == null ? null : blp.copy(),
+                        slp == null ? null : slp.copy());
+            }
         }
     }
 }
