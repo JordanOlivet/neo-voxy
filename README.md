@@ -129,6 +129,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ---
 
-**Version**: `0.2.0`  
+**Version**: `1.0.0`  
 **Minecraft**: `1.21.1`  
 **Mod Loader**: NeoForge `21.1.77+`
+
+> **Lignée** : basé sur [Voxy](https://github.com/MCRcortex/voxy) `0.2.9-alpha` (Fabric, MC 1.21.11), backporté vers MC 1.21.1 / NeoForge. Le versioning de ce fork est indépendant de l'upstream depuis le portage.
