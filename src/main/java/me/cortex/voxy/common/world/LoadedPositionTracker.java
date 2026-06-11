@@ -54,7 +54,10 @@ public final class LoadedPositionTracker {
                 //No entry found but we have acquired a write location
                 // this should be _unique_ to us as in we are the only thread with it
                 // which means we also dont need any atomic operations on it
-                if (this.value[pos] == null) {
+                // Resolved (2026-04-19): assertion was inverted — a freshly CAS-acquired slot
+                // must be null; throwing on null fired on every first insert and broke the
+                // non-zero-key path entirely.
+                if (this.value[pos] != null) {
                     throw new IllegalStateException();
                 }
                 Object val = this.value[pos] = this.factory.get();

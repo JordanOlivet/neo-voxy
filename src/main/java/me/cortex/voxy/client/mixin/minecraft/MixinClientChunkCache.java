@@ -2,6 +2,7 @@ package me.cortex.voxy.client.mixin.minecraft;
 
 import me.cortex.voxy.client.ICheekyClientChunkCache;
 import me.cortex.voxy.client.config.VoxyConfig;
+import me.cortex.voxy.common.util.ModLoaderUtil;
 import me.cortex.voxy.common.world.service.VoxelIngestService;
 import net.minecraft.client.multiplayer.ClientChunkCache;
 import net.minecraft.world.level.ChunkPos;
@@ -15,8 +16,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(ClientChunkCache.class)
 public class MixinClientChunkCache implements ICheekyClientChunkCache {
+    // Bobby keeps unloaded chunks alive longer; when present we ingest at "drop"
+    // time (here) instead of at chunk removal in MixinRenderSectionManager,
+    // because the chunk data is still accessible at this point with Bobby.
     @Unique
-    private static final boolean BOBBY_INSTALLED = false;
+    private static final boolean BOBBY_INSTALLED = ModLoaderUtil.isModLoaded("bobby");
 
     @Shadow
     volatile ClientChunkCache.Storage storage;

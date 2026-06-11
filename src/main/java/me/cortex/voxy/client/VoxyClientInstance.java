@@ -29,7 +29,9 @@ public class VoxyClientInstance extends VoxyInstance {
 
     public VoxyClientInstance() {
         super();
-        // FlashbackCompat removed for NeoForge port
+        // Flashback integration omitted: Flashback has no NeoForge build for MC 1.21.1
+        // (Modrinth lists only Fabric loader as of 2026-04). Reinstate compat/FlashbackCompat
+        // and the flashback mixins if a NeoForge port becomes available.
         Path path = null;
         this.noIngestOverride = path != null;
         if (path == null) {

@@ -1,16 +1,14 @@
 package me.cortex.voxy.common.world;
 
 import me.cortex.voxy.common.Logger;
+import net.jpountz.lz4.LZ4Factory;
+import net.jpountz.lz4.LZ4FastDecompressor;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.util.zip.GZIPInputStream;
-import java.util.zip.GZIPOutputStream;
-import java.util.zip.GZIPInputStream;
-import java.util.zip.GZIPOutputStream;
 
 /**
  * Efficient serialization and deserialization of WorldSection data for network
@@ -34,10 +32,20 @@ import java.util.zip.GZIPOutputStream;
  */
 public class SectionSerializer {
 
-    public static final byte VERSION = 5;
+    public static final byte VERSION = 6;
 
     public static final byte COMPRESSION_NONE = 0;
     public static final byte COMPRESSION_GZIP = 1;
+    public static final byte COMPRESSION_LZ4 = 2;
+
+    // LZ4 is roughly 10x faster than GZIP on this payload (32^3 longs ≈ 256 KB
+    // per section), at the cost of ~1.3x larger output. The streaming layer
+    // serializes thousands of sections per drain so the throughput improvement
+    // pays for itself many times over.
+    private static final net.jpountz.lz4.LZ4Compressor LZ4_COMPRESSOR =
+            LZ4Factory.fastestInstance().fastCompressor();
+    private static final LZ4FastDecompressor LZ4_DECOMPRESSOR =
+            LZ4Factory.fastestInstance().fastDecompressor();
 
     /**
      * Serialize a WorldSection to bytes for network transfer.
@@ -61,15 +69,23 @@ public class SectionSerializer {
                 // Serialize voxel data
                 byte[] voxelData = serializeVoxelData(section);
 
-                // Try compression
-                byte[] compressed = compress(voxelData);
-                boolean useCompression = compressed.length < voxelData.length;
-                byte[] dataToWrite = useCompression ? compressed : voxelData;
+                // LZ4 (fast). Prepend uncompressed length so decompressor knows the
+                // expected output size — LZ4FastDecompressor needs it.
+                int rawLen = voxelData.length;
+                byte[] compressed = new byte[LZ4_COMPRESSOR.maxCompressedLength(rawLen)];
+                int compLen = LZ4_COMPRESSOR.compress(voxelData, 0, rawLen, compressed, 0, compressed.length);
 
-                out.writeInt(dataToWrite.length);
-                out.writeByte(useCompression ? COMPRESSION_GZIP : COMPRESSION_NONE);
+                boolean useCompression = compLen + 4 < rawLen;
+                int payloadLen = useCompression ? compLen + 4 : rawLen;
+                out.writeInt(payloadLen);
+                out.writeByte(useCompression ? COMPRESSION_LZ4 : COMPRESSION_NONE);
                 out.writeByte(1); // hasData = true
-                out.write(dataToWrite);
+                if (useCompression) {
+                    out.writeInt(rawLen);
+                    out.write(compressed, 0, compLen);
+                } else {
+                    out.write(voxelData);
+                }
             } else {
                 out.writeInt(0);
                 out.writeByte(COMPRESSION_NONE);
@@ -110,12 +126,24 @@ public class SectionSerializer {
 
             long[] voxelData = null;
             if (hasData && dataLength > 0) {
-                byte[] rawData = new byte[dataLength];
-                in.readFully(rawData);
-
-                // Decompress if needed
-                if (compression == COMPRESSION_GZIP) {
-                    rawData = decompress(rawData);
+                byte[] rawData;
+                if (compression == COMPRESSION_LZ4) {
+                    int decompLen = in.readInt();
+                    if (decompLen < 0 || decompLen > 32 * 32 * 32 * 8 + 16) {
+                        Logger.warn("Invalid LZ4 decompressed size: " + decompLen);
+                        return null;
+                    }
+                    byte[] comp = new byte[dataLength - 4];
+                    in.readFully(comp);
+                    rawData = new byte[decompLen];
+                    LZ4_DECOMPRESSOR.decompress(comp, 0, rawData, 0, decompLen);
+                } else if (compression == COMPRESSION_GZIP) {
+                    byte[] comp = new byte[dataLength];
+                    in.readFully(comp);
+                    rawData = decompressGzip(comp);
+                } else {
+                    rawData = new byte[dataLength];
+                    in.readFully(rawData);
                 }
 
                 voxelData = deserializeVoxelData(rawData);
@@ -176,24 +204,11 @@ public class SectionSerializer {
     }
 
     /**
-     * Compress data using GZIP.
+     * Legacy GZIP decompression — kept so clients running this jar can still
+     * read sections written by older versions during a rolling upgrade.
      */
-    private static byte[] compress(byte[] data) {
-        try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                GZIPOutputStream gzip = new GZIPOutputStream(baos)) {
-            gzip.write(data);
-            gzip.finish();
-            return baos.toByteArray();
-        } catch (IOException e) {
-            return data; // Return uncompressed on failure
-        }
-    }
-
-    /**
-     * Decompress GZIP data.
-     */
-    private static byte[] decompress(byte[] data) throws IOException {
-        try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(data));
+    private static byte[] decompressGzip(byte[] data) throws IOException {
+        try (java.util.zip.GZIPInputStream gzip = new java.util.zip.GZIPInputStream(new ByteArrayInputStream(data));
                 ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[8192];
             int len;

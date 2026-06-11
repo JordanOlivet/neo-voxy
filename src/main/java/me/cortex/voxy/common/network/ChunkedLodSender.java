@@ -74,8 +74,21 @@ public class ChunkedLodSender implements AutoCloseable {
             return;
         }
 
+        boolean wasEmpty = transferQueue.isEmpty();
         transferQueue.add(new PendingTransfer(sectionData, sectionId, onComplete));
         sectionsQueued++;
+
+        // Event-driven wake: don't let the first byte of a freshly-streamed
+        // section wait up to 50ms for the next scheduled tick. tick() is
+        // idempotent and respects the bandwidth budget — calling it directly
+        // is the same work the timer would do, just sooner.
+        if (wasEmpty) {
+            try {
+                tick();
+            } catch (Throwable t) {
+                me.cortex.voxy.common.Logger.error("Eager tick after queueSection failed", t);
+            }
+        }
     }
 
     /**
@@ -88,7 +101,7 @@ public class ChunkedLodSender implements AutoCloseable {
     /**
      * Called every tick to send pending data.
      */
-    private void tick() {
+    private synchronized void tick() {
         if (!isActive.get() || !player.isAlive()) {
             return;
         }
@@ -102,8 +115,33 @@ public class ChunkedLodSender implements AutoCloseable {
                 break;
             }
 
-            // Calculate chunk size (min of remaining bytes, CHUNK_SIZE, and remaining data)
             int dataRemaining = transfer.buffer.readableBytes();
+
+            // Fast path: section is small enough to fit in a single MC custom
+            // payload and we have the bandwidth budget for it. Skip the chunked
+            // protocol entirely — no 9-byte header per chunk, no reassembly
+            // buffer round-trip on the client.
+            if (transfer.bytesSent == 0
+                    && dataRemaining <= CHUNK_SIZE
+                    && dataRemaining <= bytesRemaining) {
+                byte[] sectionData = new byte[dataRemaining];
+                transfer.buffer.readBytes(sectionData);
+                VoxyNetworkHandler.sendToPlayer(player, VoxyPacketPayload.section(sectionData));
+                bytesRemaining -= dataRemaining;
+                totalBytesSent += dataRemaining;
+                transferQueue.poll();
+                sectionsCompleted++;
+                if (transfer.onComplete != null) {
+                    try {
+                        transfer.onComplete.run();
+                    } catch (Exception e) {
+                        Logger.error("Error in transfer completion callback: " + e.getMessage());
+                    }
+                }
+                continue;
+            }
+
+            // Calculate chunk size (min of remaining bytes, CHUNK_SIZE, and remaining data)
             int chunkSize = Math.min(Math.min(bytesRemaining, CHUNK_SIZE), dataRemaining);
 
             if (chunkSize <= 0) {

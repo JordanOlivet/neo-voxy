@@ -92,13 +92,9 @@ layout(binding = POSITION_SCRATCH_BINDING, std430) POSITION_SCRATCH_ACCESS restr
 };
 #endif
 
-#ifdef LIGHTING_SAMPLER_BINDING
-
-layout(binding = LIGHTING_SAMPLER_BINDING) uniform sampler2D lightSampler;
-
-vec4 getLighting(uint index) {
-    int i2 = int(index);
-    return texture(lightSampler, clamp((vec2((i2>>4)&0xF, i2&0xF))/16, vec2(8.0f/256), vec2(248.0f/256)));
-}
-#endif
+// Lighting functions (getLightmapUv, getLighting) now live in voxy:lod/lighting.glsl
+// Ported from origine voxy 12111 branch — formula differs from former inline version
+// (origine uses (idx+0.5)/16 pixel-center sampling vs port's idx/16 corner sampling).
+// The lightSampler layout is declared in that file when LIGHTING_SAMPLER_BINDING is set.
+#import <voxy:lod/lighting.glsl>
 

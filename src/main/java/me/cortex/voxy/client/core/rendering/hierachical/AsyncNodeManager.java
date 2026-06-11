@@ -797,6 +797,18 @@ public class AsyncNodeManager {
         // this.geometryUpdateQueue.size()+"/"+this.removeBatchQueue.size());
     }
 
+    public String dumpNodeHierarchy(int blockX, int blockY, int blockZ) {
+        return this.manager.dumpNodeHierarchy(blockX, blockY, blockZ);
+    }
+
+    public String dumpL0Grid(int blockX, int blockY, int blockZ) {
+        return this.manager.dumpL0Grid(blockX, blockY, blockZ);
+    }
+
+    public String dumpGapTree(int blockX, int blockY, int blockZ) {
+        return this.manager.dumpGapTree(blockX, blockY, blockZ);
+    }
+
     public boolean hasWork() {
         return this.workCounter.get() != 0 || RESULT_HANDLE.get(this) != null;
     }
@@ -806,27 +818,34 @@ public class AsyncNodeManager {
         // update
         this.geometryCache.clear(section.key);
 
-        this.router.forwardEvent(section, flags);
+        // Tag the synchronous fan-out below as freshly-arrived so the mesh
+        // builder bumps these tasks to the head of the priority queue.
+        me.cortex.voxy.client.core.rendering.building.RenderGenerationService.setFresh(true);
+        try {
+            this.router.forwardEvent(section, flags);
 
-        if (neighborMask != 0) {// trigger rebuilds for neighbors
-            if ((neighborMask & 0b000001) != 0)
-                this.router
-                        .triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x, section.y - 1, section.z));// -y
-            if ((neighborMask & 0b000010) != 0)
-                this.router
-                        .triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x, section.y + 1, section.z));// +y
-            if ((neighborMask & 0b000100) != 0)
-                this.router
-                        .triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x - 1, section.y, section.z));// -x
-            if ((neighborMask & 0b001000) != 0)
-                this.router
-                        .triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x + 1, section.y, section.z));// +x
-            if ((neighborMask & 0b010000) != 0)
-                this.router
-                        .triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x, section.y, section.z - 1));// -z
-            if ((neighborMask & 0b100000) != 0)
-                this.router
-                        .triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x, section.y, section.z + 1));// +z
+            if (neighborMask != 0) {// trigger rebuilds for neighbors
+                if ((neighborMask & 0b000001) != 0)
+                    this.router
+                            .triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x, section.y - 1, section.z));// -y
+                if ((neighborMask & 0b000010) != 0)
+                    this.router
+                            .triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x, section.y + 1, section.z));// +y
+                if ((neighborMask & 0b000100) != 0)
+                    this.router
+                            .triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x - 1, section.y, section.z));// -x
+                if ((neighborMask & 0b001000) != 0)
+                    this.router
+                            .triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x + 1, section.y, section.z));// +x
+                if ((neighborMask & 0b010000) != 0)
+                    this.router
+                            .triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x, section.y, section.z - 1));// -z
+                if ((neighborMask & 0b100000) != 0)
+                    this.router
+                            .triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x, section.y, section.z + 1));// +z
+            }
+        } finally {
+            me.cortex.voxy.client.core.rendering.building.RenderGenerationService.setFresh(false);
         }
     }
 

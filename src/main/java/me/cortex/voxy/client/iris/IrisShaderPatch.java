@@ -12,8 +12,11 @@ import net.irisshaders.iris.shaderpack.include.AbsolutePackPath;
 import org.apache.commons.logging.Log;
 import org.lwjgl.opengl.ARBDrawBuffersBlend;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Type;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.function.Function;
 import java.util.function.IntSupplier;
@@ -320,16 +323,31 @@ public class IrisShaderPatch {
             .setLenient()
             .create();
 
+    private static final String DEFAULT_RESOURCE_PATH = "/voxy/default/";
+
+    private static String loadDefaultResource(String name) {
+        try (InputStream in = IrisShaderPatch.class.getResourceAsStream(DEFAULT_RESOURCE_PATH + name)) {
+            if (in == null) {
+                return null;
+            }
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            Logger.error("Failed to load bundled voxy default " + name, e);
+            return null;
+        }
+    }
+
     public static IrisShaderPatch makePatch(ShaderPack ipack, AbsolutePackPath directory,
             Function<AbsolutePackPath, String> sourceProvider) {
         String voxyPatchData = sourceProvider.apply(directory.resolve("voxy.json"));
-        if (voxyPatchData == null) {// No voxy patch data in shaderpack
-            return null;
-        }
-
-        // A more graceful exit on blank string
-        if (voxyPatchData.isBlank()) {
-            return null;
+        boolean useBundledDefaults = false;
+        if (voxyPatchData == null || voxyPatchData.isBlank()) {
+            voxyPatchData = loadDefaultResource("voxy.json");
+            if (voxyPatchData == null || voxyPatchData.isBlank()) {
+                return null;
+            }
+            useBundledDefaults = true;
+            Logger.info("Shader pack has no voxy.json, falling back to bundled default");
         }
 
         // Escape things
@@ -362,18 +380,24 @@ public class IrisShaderPatch {
             }
 
             {// Inject data from the auxilery files if they are present
-                var opaque = sourceProvider.apply(directory.resolve("voxy_opaque.glsl"));
+                var opaque = useBundledDefaults
+                        ? loadDefaultResource("voxy_opaque.glsl")
+                        : sourceProvider.apply(directory.resolve("voxy_opaque.glsl"));
                 if (opaque != null) {
                     Logger.info("External opaque shader patch applied");
                     patchData.opaquePatchData = opaque;
                 }
-                var translucent = sourceProvider.apply(directory.resolve("voxy_translucent.glsl"));
+                var translucent = useBundledDefaults
+                        ? loadDefaultResource("voxy_translucent.glsl")
+                        : sourceProvider.apply(directory.resolve("voxy_translucent.glsl"));
                 if (translucent != null) {
                     Logger.info("External translucent shader patch applied");
                     patchData.translucentPatchData = translucent;
                 }
                 // This might be ok? not.. sure if is nice or not
-                var taa = sourceProvider.apply(directory.resolve("voxy_taa.glsl"));
+                var taa = useBundledDefaults
+                        ? loadDefaultResource("voxy_taa.glsl")
+                        : sourceProvider.apply(directory.resolve("voxy_taa.glsl"));
                 if (taa != null) {
                     Logger.info("External taa shader patch applied");
                     patchData.taaOffset = taa;

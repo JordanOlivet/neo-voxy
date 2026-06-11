@@ -8,6 +8,7 @@ import me.cortex.voxy.client.mixin.sodium.AccessorSodiumWorldRenderer;
 import me.cortex.voxy.common.util.cpu.CpuLayout;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import net.caffeinemc.mods.sodium.client.gui.options.*;
+import net.caffeinemc.mods.sodium.client.gui.options.control.CyclingControl;
 import net.caffeinemc.mods.sodium.client.gui.options.control.SliderControl;
 import net.caffeinemc.mods.sodium.client.gui.options.control.TickBoxControl;
 import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
@@ -94,6 +95,18 @@ public abstract class VoxyConfigScreenPages {
                         .setBinding((s, v) -> s.ingestEnabled = v, s -> s.ingestEnabled)
                         .setImpact(OptionImpact.MEDIUM)
                         .build())
+                .add(OptionImpl.createBuilder(VoxyConfig.MultiplayerMode.class, storage)
+                        .setName(Component.translatable("voxy.config.general.multiplayerMode"))
+                        .setTooltip(Component.translatable("voxy.config.general.multiplayerMode.tooltip"))
+                        .setControl(opt -> new CyclingControl<>(opt, VoxyConfig.MultiplayerMode.class,
+                                new Component[] {
+                                        Component.translatable("voxy.config.general.multiplayerMode.auto"),
+                                        Component.translatable("voxy.config.general.multiplayerMode.client_only"),
+                                        Component.translatable("voxy.config.general.multiplayerMode.server_stream")
+                                }))
+                        .setBinding((s, v) -> s.multiplayerMode = v, s -> s.multiplayerMode)
+                        .setImpact(OptionImpact.MEDIUM)
+                        .build())
                 .build());
 
         groups.add(OptionGroup.createBuilder()
@@ -125,9 +138,9 @@ public abstract class VoxyConfigScreenPages {
                 .add(OptionImpl.createBuilder(int.class, storage)
                         .setName(Component.translatable("voxy.config.general.renderDistance"))
                         .setTooltip(Component.translatable("voxy.config.general.renderDistance.tooltip"))
-                        .setControl(opt -> new SliderControl(opt, 2, 64, 1,
+                        .setControl(opt -> new SliderControl(opt, 2, 128, 1,
                                 v -> Component.literal(Integer.toString(v * 32))))// Every unit is equal to 32 vanilla
-                                                                                  // chunks
+                                                                                  // chunks. Max 128 = 4096 chunks (~65 km).
                         .setBinding((s, v) -> {
                             s.sectionRenderDistance = v;
                             var vrsh = (IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer;
@@ -137,6 +150,8 @@ public abstract class VoxyConfigScreenPages {
                                     vrs.setRenderDistance(v);
                                 }
                             }
+                            // Inform the server so it can clamp its streaming radius.
+                            me.cortex.voxy.common.network.VoxyNetworkHandler.sendClientHint();
                         }, s -> s.sectionRenderDistance)
                         .setImpact(OptionImpact.LOW)
                         .build())
@@ -152,6 +167,27 @@ public abstract class VoxyConfigScreenPages {
                         .setControl(TickBoxControl::new)
                         .setBinding((s, v) -> RenderStatistics.enabled = v, s -> RenderStatistics.enabled)
                         .setFlags(OptionFlag.REQUIRES_RENDERER_RELOAD)
+                        .build())
+                .add(OptionImpl.createBuilder(boolean.class, storage)
+                        .setName(Component.translatable("voxy.config.general.debug_dump_on_screenshot"))
+                        .setTooltip(Component.translatable("voxy.config.general.debug_dump_on_screenshot.tooltip"))
+                        .setControl(TickBoxControl::new)
+                        .setBinding((s, v) -> s.debugDumpOnScreenshot = v, s -> s.debugDumpOnScreenshot)
+                        .build())
+                .add(OptionImpl.createBuilder(boolean.class, storage)
+                        .setName(Component.translatable("voxy.config.general.log_gap_diag"))
+                        .setTooltip(Component.translatable("voxy.config.general.log_gap_diag.tooltip"))
+                        .setControl(TickBoxControl::new)
+                        .setBinding((s, v) -> s.logGapDiag = v, s -> s.logGapDiag)
+                        .build())
+                .add(OptionImpl.createBuilder(boolean.class, storage)
+                        .setName(Component.translatable("voxy.config.general.diag_first_connect"))
+                        .setTooltip(Component.translatable("voxy.config.general.diag_first_connect.tooltip"))
+                        .setControl(TickBoxControl::new)
+                        .setBinding((s, v) -> {
+                            s.diagFirstConnect = v;
+                            me.cortex.voxy.common.VoxyDiag.setEnabled(v);
+                        }, s -> s.diagFirstConnect)
                         .build())
                 .build());
         return new OptionPage(Component.translatable("voxy.config.title"), ImmutableList.copyOf(groups));

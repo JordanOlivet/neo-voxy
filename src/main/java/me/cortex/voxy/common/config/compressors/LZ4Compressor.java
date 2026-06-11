@@ -43,9 +43,11 @@ public class LZ4Compressor implements StorageCompressor {
                 return null;
             }
             var res = SCRATCH.get().createUntrackedUnfreeableReference();
-            int size = this.decompressor.decompress(saveData.asByteBuffer(), 4, res.asByteBuffer(), 0,
+            // LZ4FastDecompressor.decompress returns the number of bytes read from src,
+            // not the decompressed size — the actual decompressed length is decompressedSize.
+            this.decompressor.decompress(saveData.asByteBuffer(), 4, res.asByteBuffer(), 0,
                     decompressedSize);
-            return res.subSize(size);
+            return res.subSize(decompressedSize);
         } catch (Exception e) {
             me.cortex.voxy.common.Logger.warn("Failed to decompress section (size=" + saveData.size
                     + ", first bytes: " + formatFirstBytes(saveData) + ")", e);

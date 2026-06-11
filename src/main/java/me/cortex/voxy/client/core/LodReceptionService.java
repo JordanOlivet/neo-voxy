@@ -1,7 +1,9 @@
 package me.cortex.voxy.client.core;
 
+import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.network.ClientCongestionControl;
 import me.cortex.voxy.common.Logger;
+import me.cortex.voxy.common.VoxyDiag;
 import me.cortex.voxy.common.network.BloomFilter;
 import me.cortex.voxy.common.network.IdRemapper;
 import me.cortex.voxy.common.network.VoxyNetworkHandler;
@@ -57,14 +59,47 @@ public class LodReceptionService implements AutoCloseable {
     /** Sections that have been received from the server */
     private final Set<Long> receivedSections = ConcurrentHashMap.newKeySet();
 
-    /** Sections pending processing because models aren't ready yet */
-    private final ConcurrentHashMap<Long, byte[]> pendingSections = new ConcurrentHashMap<>();
+    /**
+     * Sections pending processing because models aren't ready yet.
+     * <p>
+     * Previously this stored just the raw compressed byte[], which forced
+     * {@link #processPendingSections()} to LZ4-decompress every parked
+     * section on every main-thread tick to re-check model availability. On
+     * cold first-connect the queue grew to ~2000 entries while models were
+     * still baking, and the recurring decompress-storm stalled the render
+     * thread for >1.5 s per frame. {@link PendingEntry} caches the sampled
+     * required-blockId set when the section is first parked so the recheck
+     * is O(set.size) hash lookups with no LZ4 work at all.
+     */
+    private final ConcurrentHashMap<Long, PendingEntry> pendingSections = new ConcurrentHashMap<>();
+
+    private static final class PendingEntry {
+        final byte[] data;
+        /** Unique sampled blockIds that must be baked before this section can apply. */
+        final int[] requiredBlockIds;
+
+        PendingEntry(byte[] data, int[] requiredBlockIds) {
+            this.data = data;
+            this.requiredBlockIds = requiredBlockIds;
+        }
+    }
 
     /** Whether the mapper has been synced (required for processing) */
     private volatile boolean mapperReady = false;
 
     /** Whether we've already requested sync */
     private volatile boolean syncRequested = false;
+
+    /**
+     * True when the active connection lacks the Voxy channel (vanilla server) or
+     * the user has forced {@code CLIENT_ONLY}. In that case we never send sync
+     * requests and the client falls back to local chunk ingest (handled by
+     * {@code ClientChunkIngestListener}).
+     */
+    private volatile boolean localMode = false;
+
+    /** Last MC dimension key observed — drives auto-resync on dimension change. */
+    private volatile net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> lastDimension = null;
 
     public LodReceptionService(WorldEngine worldEngine, Mapper clientMapper,
             me.cortex.voxy.client.core.model.ModelBakerySubsystem modelBakery) {
@@ -73,11 +108,19 @@ public class LodReceptionService implements AutoCloseable {
         this.modelBakery = modelBakery;
         this.congestionControl = new ClientCongestionControl(this::onRateUpdate);
 
-        this.processingExecutor = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "VoxyLodReception");
+        // Small pool so deserialize + applyVoxelData on incoming sections can run
+        // in parallel. Concurrent writes only happen if the same section key gets
+        // streamed twice in quick succession; the server-side dedup
+        // ({@code lastSentVersion}) keeps that rare, and when it does happen both
+        // packets carry the same bytes so last-write-wins is benign.
+        int workers = Math.max(2, Runtime.getRuntime().availableProcessors() / 4);
+        java.util.concurrent.atomic.AtomicInteger idx = new java.util.concurrent.atomic.AtomicInteger();
+        this.processingExecutor = Executors.newFixedThreadPool(workers, r -> {
+            Thread t = new Thread(r, "VoxyLodReception-" + idx.getAndIncrement());
             t.setDaemon(true);
             return t;
         });
+        Logger.info("LodReceptionService processing pool: " + workers + " workers");
 
         // Register client message handler
         VoxyNetworkHandler.setClientMessageHandler(this::handleServerMessage);
@@ -94,7 +137,43 @@ public class LodReceptionService implements AutoCloseable {
             return;
         }
 
+        // Auto-resync on dimension change. Comparing ResourceKey is cheap and
+        // catches both respawn-via-portal and the rare manual /execute-in cases.
+        var mc = net.minecraft.client.Minecraft.getInstance();
+        if (mc != null && mc.level != null) {
+            var dim = mc.level.dimension();
+            if (dim != null && dim != lastDimension) {
+                if (lastDimension != null) {
+                    Logger.info("Dimension changed (" + lastDimension.location() + " → " + dim.location() +
+                            "), re-issuing LOD sync");
+                    resetForReconnect();
+                }
+                lastDimension = dim;
+            }
+        }
+
         if (!VoxyNetworkHandler.shouldEnableStreaming()) {
+            return;
+        }
+
+        if (localMode) {
+            // Process pending sections in case the player ingested locally and models
+            // just became available.
+            if (!pendingSections.isEmpty()) {
+                processPendingSections();
+            }
+            return;
+        }
+
+        // Resolve the effective mode on first tick after connect.
+        VoxyConfig.MultiplayerMode mode = VoxyNetworkHandler.getEffectiveMode();
+        if (mode == VoxyConfig.MultiplayerMode.CLIENT_ONLY) {
+            if (!syncRequested) {
+                Logger.info("LodReceptionService: server lacks Voxy channel (or CLIENT_ONLY forced), switching to client-local ingest");
+            }
+            syncRequested = true;
+            localMode = true;
+            mapperReady = true; // we will use the client mapper directly; no remap needed
             return;
         }
 
@@ -102,13 +181,62 @@ public class LodReceptionService implements AutoCloseable {
         if (!syncRequested) {
             syncRequested = true;
             Logger.info("Requesting LOD sync for server-driven streaming");
-            VoxyNetworkHandler.sendToServer(VoxyPacketPayload.syncRequest());
+            VoxyDiag.startWindow(60);
+            VoxyDiag.event("syncRequested");
+            boolean sent = VoxyNetworkHandler.sendToServer(VoxyPacketPayload.syncRequest());
+            if (!sent) {
+                Logger.warn("Initial sync request not delivered — falling back to client-local ingest");
+                localMode = true;
+                mapperReady = true;
+            } else {
+                // Push our render distance so the server clamps its streaming radius
+                // to what we'll actually display.
+                VoxyNetworkHandler.sendClientHint();
+            }
         }
 
         // Process pending sections whose models are now available
         if (!pendingSections.isEmpty()) {
+            long t0 = VoxyDiag.isEnabled() ? System.nanoTime() : 0L;
             processPendingSections();
+            if (VoxyDiag.isEnabled()) {
+                VoxyDiag.timing("processPendingSections", System.nanoTime() - t0, 5_000_000L);
+            }
         }
+
+        if (VoxyDiag.shouldSnapshot()) {
+            VoxyDiag.log("rx pend=" + pendingSections.size()
+                    + " cached=" + receivedSections.size()
+                    + " rcv=" + sectionsReceived.get()
+                    + " app=" + sectionsApplied.get()
+                    + " reassembly=" + reassemblyBuffers.size()
+                    + " mapperReady=" + mapperReady
+                    + " | bake queued=" + modelBakery.getQueuedBakeCount()
+                    + " inflight=" + modelBakery.getInflightBakeCount()
+                    + " baked=" + modelBakery.getBakedCount()
+                    + " upQ=" + modelBakery.getQueuedUploadCount()
+                    + " rawQ=" + modelBakery.getRawBakeResultsSize()
+                    + " fps=" + net.minecraft.client.Minecraft.getInstance().getFps());
+        }
+    }
+
+    public boolean isLocalMode() {
+        return localMode;
+    }
+
+    /**
+     * Reset the sync-request state on world / dimension transition so a fresh
+     * connection retries the handshake from scratch.
+     */
+    public void resetForReconnect() {
+        syncRequested = false;
+        mapperReady = false;
+        localMode = false;
+        receivedSections.clear();
+        pendingSections.clear();
+        reassemblyBuffers.clear();
+        idRemapper.reset();
+        VoxyNetworkHandler.resetConnectionState();
     }
 
     /**
@@ -129,11 +257,59 @@ public class LodReceptionService implements AutoCloseable {
 
     /**
      * Handle mapper sync from server.
+     * <p>
+     * Building the remap tables walks ~1200 block-state strings, parsing each
+     * via the vanilla block registry. Even with the O(1) lookup fix in
+     * {@link me.cortex.voxy.common.world.other.Mapper#getOrRegisterBlockStateFromString}
+     * the parse loop still allocates and registers new entries; doing it on
+     * the network/render thread costs noticeable frames. Hand the work off to
+     * {@link #processingExecutor} — everything else gates on
+     * {@link IdRemapper#isReady()}, so any LOD sections that arrive while the
+     * build is in flight simply sit in {@code pendingSections} and replay
+     * once {@code mapperReady} flips.
      */
     private void handleMapperSync(VoxyPacketPayload payload) {
-        Logger.info("Received mapper sync from server (" + payload.data().length + " bytes)");
-        idRemapper.buildFromServerData(payload.data(), clientMapper);
-        mapperReady = true;
+        final byte[] data = payload.data();
+        Logger.info("Received mapper sync from server (" + data.length + " bytes)");
+        VoxyDiag.event("mapperSyncReceived bytes=" + data.length);
+        final long t0 = System.nanoTime();
+        processingExecutor.submit(() -> {
+            try {
+                idRemapper.buildFromServerData(data, clientMapper);
+                long ms = (System.nanoTime() - t0) / 1_000_000L;
+                Logger.info("ID remapper built off-thread in " + ms + "ms");
+                VoxyDiag.event("remapperBuilt " + ms + "ms (off-thread)");
+                mapperReady = true;
+                prebakeFromMapper();
+            } catch (Throwable t) {
+                Logger.error("Failed to build ID remapper", t);
+            }
+        });
+    }
+
+    /**
+     * Request a bake for every block state the server's mapper sync just
+     * registered in the client mapper. The curated pre-bake at world load is
+     * a best-effort warm-up (it runs before any sync arrives and only covers a
+     * vanilla-shaped subset of blocks); this pass guarantees exact coverage
+     * for whatever the server actually has — including blocks from mods only
+     * the server has loaded — and dedup'ing happens for free because
+     * {@link me.cortex.voxy.client.core.model.ModelBakerySubsystem#requestBlockBake(int)}
+     * returns {@code false} the second time it sees an id, so the curated
+     * pre-bake's warm-up bakes are not redone.
+     */
+    private void prebakeFromMapper() {
+        var entries = clientMapper.getStateEntries();
+        int requested = 0;
+        for (var entry : entries) {
+            if (entry == null) continue;
+            if (modelBakery.requestBlockBake(entry.id)) {
+                requested++;
+            }
+        }
+        Logger.info("Mapper-driven pre-bake: requested " + requested + " additional block states (of "
+                + entries.length + " in mapper)");
+        VoxyDiag.event("mapperPrebake requested=" + requested + " total=" + entries.length);
     }
 
     /**
@@ -187,6 +363,8 @@ public class LodReceptionService implements AutoCloseable {
     private void handleSyncComplete(VoxyPacketPayload payload) {
         Logger.info("LOD sync complete! Received: " + sectionsReceived.get() +
                 ", Applied: " + sectionsApplied.get());
+        VoxyDiag.event("syncComplete rcv=" + sectionsReceived.get()
+                + " app=" + sectionsApplied.get());
     }
 
     /**
@@ -223,10 +401,15 @@ public class LodReceptionService implements AutoCloseable {
             long key = sectionData.getKey();
 
             // Check if all required models for this section are available
-            if (sectionData.hasData() && !areModelsAvailable(sectionData.voxelData)) {
-                // Models not ready yet, queue for later processing
-                pendingSections.put(key, data);
-                return;
+            if (sectionData.hasData()) {
+                int[] requiredIds = sampleRequiredBlockIds(sectionData.voxelData);
+                if (!allModelsReady(requiredIds)) {
+                    // Models not ready yet, queue for later processing. Cache the
+                    // sampled blockIds so the tick recheck doesn't need to LZ4
+                    // decompress the byte[] again.
+                    pendingSections.put(key, new PendingEntry(data, requiredIds));
+                    return;
+                }
             }
 
             // Mark as received
@@ -248,9 +431,24 @@ public class LodReceptionService implements AutoCloseable {
                 // Update non-empty children
                 section._unsafeSetNonEmptyChildren(sectionData.nonEmptyChildren);
 
-                // Mark dirty to trigger rendering - must use worldEngine.markDirty()
-                // to trigger the dirty callback that notifies the render system
-                worldEngine.markDirty(section);
+                // Render gates mesh generation behind {@code isFullyIngested()} (octant
+                // mask == 0xFF). On the server side, sections at the boundary of vanilla
+                // view-distance only have some of their 8 octants ingested because the
+                // missing chunks aren't currently loaded, so their octant mask stays
+                // partial (0xaa / 0xcc / 0x33 / ...) — that triggered visible holes in
+                // the rendered LOD anywhere the player's view-distance "circle" cut
+                // across a 32-block voxy section column. Treat any section we receive
+                // over the network as authoritative: the server already had whatever
+                // data it had, no point waiting on octants that may never come.
+                section._unsafeSetFullyIngested();
+
+                // Server-streamed sections never went through WorldUpdater.insertUpdate
+                // on the client, so the render system has no idea that the new section's
+                // 6 neighbors need their boundary meshes re-built. Without this the
+                // section boundaries stay rendered against stale neighbor data and you
+                // get a visible grid of seams (the "quadrillage") on dimension reload
+                // or after Chunky generation. Force a full neighbor remesh.
+                worldEngine.markDirty(section, WorldEngine.DEFAULT_UPDATE_FLAGS, 0b111111);
 
                 sectionsApplied.incrementAndGet();
 
@@ -265,69 +463,71 @@ public class LodReceptionService implements AutoCloseable {
     }
 
     /**
-     * Checks if all models referenced in the voxel data are available in the model
-     * bakery.
-     *
-     * @param voxelData The voxel data array.
-     * @return True if all models are available, false otherwise.
+     * Sample {@code voxelData} for the unique client-side blockIds that need to
+     * be baked before the section can apply. Done once when a section is first
+     * deserialized so the tick recheck doesn't need to LZ4-decompress the
+     * payload again. Mirrors the legacy {@code areModelsAvailable} sampling
+     * cadence (every 64th voxel, cap at 16 unique blocks) — we only need a
+     * representative subset, not a true union, because any one missing model
+     * already forces the section to wait.
      */
-    private boolean areModelsAvailable(long[] voxelData) {
-        if (!idRemapper.isReady()) {
-            return false; // Cannot check model availability without a remapper
-        }
-        // Sample voxel data to check if models are ready
-        // Only check a small sample to avoid performance issues
-        it.unimi.dsi.fastutil.ints.IntOpenHashSet checkedBlocks = new it.unimi.dsi.fastutil.ints.IntOpenHashSet();
-
-        // Sample every 64th voxel to keep it fast
+    private int[] sampleRequiredBlockIds(long[] voxelData) {
+        boolean remapReady = idRemapper.isReady();
+        it.unimi.dsi.fastutil.ints.IntOpenHashSet seen = new it.unimi.dsi.fastutil.ints.IntOpenHashSet();
         int step = Math.max(1, voxelData.length / 64);
         for (int i = 0; i < voxelData.length; i += step) {
-            long serverVoxel = voxelData[i];
-            long clientVoxel = idRemapper.remapVoxelId(serverVoxel);
-            int clientBlockId = me.cortex.voxy.common.world.other.Mapper.getBlockId(clientVoxel);
-            if (clientBlockId != 0 && checkedBlocks.add(clientBlockId)) {
-                if (!modelBakery.factory.hasModelForBlockId(clientBlockId)) {
-                    // Request the model to be baked
-                    modelBakery.requestBlockBake(clientBlockId);
-                    return false;
-                }
+            long voxel = voxelData[i];
+            long client = remapReady ? idRemapper.remapVoxelId(voxel) : voxel;
+            int blockId = me.cortex.voxy.common.world.other.Mapper.getBlockId(client);
+            if (blockId != 0) {
+                seen.add(blockId);
+                if (seen.size() >= 16) break;
             }
-            // Limit checking to first 16 unique blocks to keep it fast
-            if (checkedBlocks.size() >= 16) {
-                break;
+        }
+        return seen.toIntArray();
+    }
+
+    /**
+     * Returns {@code true} iff every blockId in {@code requiredBlockIds} has a
+     * baked model. Missing models trigger a {@code requestBlockBake} (which is
+     * itself dedup'd internally) so the bake pipeline keeps making progress as
+     * the tick re-polls. Cheap — no LZ4, no allocations beyond the per-call
+     * iteration. Pre-condition for applying a pending section to the world
+     * engine.
+     */
+    private boolean allModelsReady(int[] requiredBlockIds) {
+        if (!idRemapper.isReady()) {
+            return false;
+        }
+        for (int id : requiredBlockIds) {
+            if (!modelBakery.factory.hasModelForBlockId(id)) {
+                modelBakery.requestBlockBake(id);
+                return false;
             }
         }
         return true;
     }
 
     /**
-     * Processes sections that were previously queued because their models were not
-     * ready.
+     * Processes sections that were previously queued because their models were
+     * not ready. Walks the pending map without re-deserializing the payload —
+     * each entry's cached {@code requiredBlockIds} array is matched against
+     * {@code ModelFactory.hasModelForBlockId}, and ready entries are atomically
+     * removed (via {@code remove(key, value)}) and shipped to the processing
+     * executor. The previous implementation ran a fresh
+     * {@link SectionSerializer#deserialize} per pending entry per tick, which
+     * stalled the render thread by >1.5 s during the initial bake storm.
      */
     private void processPendingSections() {
-        // Create a temporary list to avoid ConcurrentModificationException
-        // and to allow processing in batches
-        Set<Long> sectionsToProcess = ConcurrentHashMap.newKeySet();
-        for (Long key : pendingSections.keySet()) {
-            sectionsToProcess.add(key);
-        }
-
-        for (Long key : sectionsToProcess) {
-            byte[] data = pendingSections.get(key);
-            if (data != null) {
-                try {
-                    SectionSerializer.SectionData sectionData = SectionSerializer.deserialize(data);
-                    if (sectionData != null && areModelsAvailable(sectionData.voxelData)) {
-                        pendingSections.remove(key);
-                        // Submit to processing executor to maintain consistent processing flow
-                        processingExecutor.submit(() -> processSection(data));
-                    }
-                } catch (Exception e) {
-                    Logger.error(
-                            "Error re-processing pending section " + Long.toHexString(key) + ": " + e.getMessage());
-                    Logger.error(e);
-                    pendingSections.remove(key); // Remove to avoid infinite retries on error
-                }
+        var it = pendingSections.entrySet().iterator();
+        while (it.hasNext()) {
+            var entry = it.next();
+            PendingEntry pending = entry.getValue();
+            if (pending == null) continue;
+            if (!allModelsReady(pending.requiredBlockIds)) continue;
+            if (pendingSections.remove(entry.getKey(), pending)) {
+                final byte[] data = pending.data;
+                processingExecutor.submit(() -> processSection(data));
             }
         }
     }
@@ -378,6 +578,22 @@ public class LodReceptionService implements AutoCloseable {
         return String.format("Received: %d, Applied: %d, Cached: %d",
                 sectionsReceived.get(), sectionsApplied.get(),
                 receivedSections.size());
+    }
+
+    public int getPendingSize() {
+        return this.pendingSections.size();
+    }
+
+    public int getReceivedCacheSize() {
+        return this.receivedSections.size();
+    }
+
+    public int getSectionsReceived() {
+        return this.sectionsReceived.get();
+    }
+
+    public int getSectionsApplied() {
+        return this.sectionsApplied.get();
     }
 
     @Override

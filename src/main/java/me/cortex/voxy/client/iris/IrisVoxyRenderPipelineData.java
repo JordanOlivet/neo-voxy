@@ -466,7 +466,14 @@ public class IrisVoxyRenderPipelineData {
     private record TextureWSampler(String name, IntSupplier texture, int sampler) {
     }
 
-    public record ImageSet(String layout, IntConsumer bindingFunction) {
+    /**
+     * Layout + binder for the per-pack sampler set.
+     *
+     * @param count number of sampler slots the shader layout declares; needed
+     *              by {@link IrisVoxyRenderPipeline} to size its top-down
+     *              allocation on {@code GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS}.
+     */
+    public record ImageSet(String layout, IntConsumer bindingFunction, int count) {
 
     }
 
@@ -585,10 +592,16 @@ public class IrisVoxyRenderPipelineData {
                 } // TODO: might need to bind sampler 0
             }
         };
-        return new ImageSet(builder.toString(), bindingFunction);
+        return new ImageSet(builder.toString(), bindingFunction, samplers.length);
     }
 
-    public record SSBOSet(String layout, IntConsumer bindingFunction) {
+    /**
+     * Layout + binder for the per-pack SSBO set.
+     *
+     * @param count number of SSBO slots declared; used for top-down allocation
+     *              on {@code GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS}.
+     */
+    public record SSBOSet(String layout, IntConsumer bindingFunction, int count) {
     }
 
     private record SSBOBinding(int irisIndex, int bindingOffset) {
@@ -621,6 +634,6 @@ public class IrisVoxyRenderPipelineData {
                         ssboStore.getBufferIndex(binding.irisIndex));
             }
         };
-        return new SSBOSet(builder.toString(), bindingFunction);
+        return new SSBOSet(builder.toString(), bindingFunction, bindings.length);
     }
 }

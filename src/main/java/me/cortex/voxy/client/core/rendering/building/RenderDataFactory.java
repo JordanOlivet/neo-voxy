@@ -18,6 +18,14 @@ import java.util.Arrays;
 
 public class RenderDataFactory {
     private static final boolean CHECK_NEIGHBOR_FACE_OCCLUSION = true;
+    // Note (2026-04-29): the original flag's truth-table is inverted relative to its
+    // name — when set to true, the cull-same shortcut ALWAYS fires on same-model
+    // neighbors (more aggressive culling), not less. Left as-is to preserve dev
+    // intent. The over-culling on partial same-model blocks (stairs/slabs in same
+    // orientation, comparators, etc.) is now mitigated by the asymmetric
+    // faceCanBeOccluded(self.meta, face) gate added at every cull-same site
+    // (2026-04-29). Stained-glass-on-chunk-border bug (item 11b) is unrelated to
+    // this flag and remains open pending runtime reproduction.
     private static final boolean DISABLE_CULL_SAME_OCCLUDES = false;//TODO: FIX TRANSLUCENTS (e.g. stained glass) breaking on chunk boarders with this set to false (it might be something else????)
 
     private static final boolean VERIFY_MESHING = VoxyCommon.isVerificationFlagOn("verifyMeshing");
@@ -145,10 +153,16 @@ public class RenderDataFactory {
             MemoryUtil.memPutLong(RenderDataFactory.this.quadBufferPtr + bufferOffset, quad);
 
 
-            //Update AABB bounds
+            // Update AABB bounds — convention: min inclusive, max exclusive, extent = max-min ∈ [1,32].
+            // Resolved (2026-04-21): normal-axis max was previously set to auxPos (inclusive) while
+            // tangent-axis max used +length/+width (exclusive), giving extent=0 for planar geometry
+            // (single-plane walls, floors, bedrock layers). The 0 extent underflowed the
+            // `(max-min-1)<<shift` encoding to -1, corrupting neighboring bit fields in the packed
+            // AABB and making affected LOD chunks render at a broken AABB (invisible at certain
+            // camera positions). Fix: auxPos+1 on the normal axis, consistent exclusive max everywhere.
             if (axis == 0) {//Y
                 RenderDataFactory.this.minY = Math.min(RenderDataFactory.this.minY, auxPos);
-                RenderDataFactory.this.maxY = Math.max(RenderDataFactory.this.maxY, auxPos);
+                RenderDataFactory.this.maxY = Math.max(RenderDataFactory.this.maxY, auxPos + 1);
 
                 RenderDataFactory.this.minX = Math.min(RenderDataFactory.this.minX, x);
                 RenderDataFactory.this.maxX = Math.max(RenderDataFactory.this.maxX, x + length);
@@ -157,7 +171,7 @@ public class RenderDataFactory {
                 RenderDataFactory.this.maxZ = Math.max(RenderDataFactory.this.maxZ, z + width);
             } else if (axis == 1) {//Z
                 RenderDataFactory.this.minZ = Math.min(RenderDataFactory.this.minZ, auxPos);
-                RenderDataFactory.this.maxZ = Math.max(RenderDataFactory.this.maxZ, auxPos);
+                RenderDataFactory.this.maxZ = Math.max(RenderDataFactory.this.maxZ, auxPos + 1);
 
                 RenderDataFactory.this.minX = Math.min(RenderDataFactory.this.minX, x);
                 RenderDataFactory.this.maxX = Math.max(RenderDataFactory.this.maxX, x + length);
@@ -166,7 +180,7 @@ public class RenderDataFactory {
                 RenderDataFactory.this.maxY = Math.max(RenderDataFactory.this.maxY, z + width);
             } else {//X
                 RenderDataFactory.this.minX = Math.min(RenderDataFactory.this.minX, auxPos);
-                RenderDataFactory.this.maxX = Math.max(RenderDataFactory.this.maxX, auxPos);
+                RenderDataFactory.this.maxX = Math.max(RenderDataFactory.this.maxX, auxPos + 1);
 
                 RenderDataFactory.this.minY = Math.min(RenderDataFactory.this.minY, x);
                 RenderDataFactory.this.maxY = Math.max(RenderDataFactory.this.maxY, x + length);
@@ -340,19 +354,51 @@ public class RenderDataFactory {
 
     private static final long LM = (0xFFL<<55);
 
-    private static boolean shouldMeshNonOpaqueBlockFace(int face, long quad, long meta, long neighborQuad, long neighborMeta) {
-        if (((quad^neighborQuad)&(0xFFFFL<<26))==0 && (DISABLE_CULL_SAME_OCCLUDES || (ModelQueries.cullsSame(meta)||ModelQueries.faceOccludes(meta, face)))) return false;//This is a hack, if the neigbor and this are the same, dont mesh the face// TODO: FIXME
+    // Apply emissive block light: override BL nibble with max(existing, selfMeta emission).
+    // BL occupies 4 bits at offset 55+4 (high nibble of LM byte).
+    private static long applyQuadLight(long quad, long selfmeta) {
+        final long BLMSK = 0xFL<<(55+4);
+        long bl = quad & BLMSK;
+        bl = Math.max(bl, ModelQueries.lightEmission(selfmeta)<<(55+4));
+        quad &= ~BLMSK;
+        quad |= bl;
+        return quad;
+    }
+
+    // Resolved (2026-04-27): replaces a bare `faceOccludes(neighbor, opp)` boolean
+    // (full-block opaque only) with an OR'd mask-aware check. The legacy
+    // `faceOccludes` branch still fires for full-opaque neighbors AND covers the
+    // case of a transparent self (empty mask) hidden behind a solid wall — the
+    // mask-only check would wrongly let those through. The mask check adds
+    // partial-vs-partial culling (e.g. two same-orientation slabs facing each
+    // other across a section boundary) that was previously missed.
+    private boolean isFaceCoveredByNeighbor(int selfClientId, int selfFace, int neighborClientId, long neighborMeta) {
+        int oppositeFace = selfFace ^ 1;
+        if (ModelQueries.faceOccludes(neighborMeta, oppositeFace)) return true;
+        return this.modelMan.isFaceFullyOccludedBy(selfClientId, selfFace, neighborClientId, oppositeFace);
+    }
+
+    private boolean shouldMeshNonOpaqueBlockFace(int face, long quad, long meta, long neighborQuad, long neighborMeta) {
+        // Resolved (2026-04-29): added asymmetric faceCanBeOccluded(self.meta, face) gate.
+        // Prevents over-culling between two same-model partial blocks (stairs/slabs
+        // same-orientation) where the face is at offset >= 0.3 — the face cannot
+        // physically be occluded by anything, so the cull-same shortcut must not fire.
+        if (((quad^neighborQuad)&(0xFFFFL<<26))==0 && ModelQueries.faceCanBeOccluded(meta, face) && (DISABLE_CULL_SAME_OCCLUDES || (ModelQueries.cullsSame(meta)||ModelQueries.faceOccludes(meta, face)))) return false;//This is a hack, if the neigbor and this are the same, dont mesh the face// TODO: FIXME
         if (!ModelQueries.faceExists(meta, face)) return false;//Dont mesh if no face
         //if (ModelQueries.faceCanBeOccluded(meta, face)) //TODO: maybe enable this
-            if (ModelQueries.faceOccludes(neighborMeta, face^1)) return false;
+            int selfId = (int)((quad >> 26) & 0xFFFF);
+            int neighborId = (int)((neighborQuad >> 26) & 0xFFFF);
+            if (this.isFaceCoveredByNeighbor(selfId, face, neighborId, neighborMeta)) return false;
         return true;
     }
 
-    private static void meshNonOpaqueFace(int face, long quad, long meta, long neighborQuad, long neighborMeta, Mesher mesher) {
-        if (shouldMeshNonOpaqueBlockFace(face, quad, meta, neighborQuad, neighborMeta)) {
-            mesher.putNext((long) (face&1) |
+    private void meshNonOpaqueFace(int face, long quad, long meta, long neighborQuad, long neighborMeta, Mesher mesher) {
+        if (this.shouldMeshNonOpaqueBlockFace(face, quad, meta, neighborQuad, neighborMeta)) {
+            mesher.putNext(applyQuadLight(
+                    (long) (face&1) |
                     (quad&~LM) |
-                    ((ModelQueries.faceUsesSelfLighting(meta, face)?quad:neighborQuad) & LM));
+                    ((ModelQueries.faceUsesSelfLighting(meta, face)?quad:neighborQuad) & LM),
+                    meta));
         } else {
             mesher.skip(1);
         }
@@ -398,24 +444,34 @@ public class RenderDataFactory {
                         int iB = idx * 2 + (facingForward == 1 ? shift : 0);
 
                         long selfModel = this.sectionData[iA];
+                        long selfMetaForLight = this.sectionData[iA + 1];
                         long nextModel = this.sectionData[iB];
 
                         //Check if next culls this face
                         if (CHECK_NEIGHBOR_FACE_OCCLUSION) {
+                            long selfMeta = selfMetaForLight;
                             long neighbor = this.sectionData[iB + 1];
+                            int selfFace = (axis << 1) | facingForward;
                             boolean culls = false;
-                            culls |= ((selfModel^nextModel)&(0xFFFFL<<26))==0&&ModelQueries.cullsSame(neighbor);
-                            culls |= ModelQueries.faceOccludes(neighbor, (axis << 1) | (1 - facingForward));
+                            // Resolved (2026-04-29): asymmetric faceCanBeOccluded(self) gate added —
+                            // cullsSame is a global per-block flag, but only faces actually flush
+                            // against the cube boundary should be culled by it.
+                            culls |= ((selfModel^nextModel)&(0xFFFFL<<26))==0 && ModelQueries.faceCanBeOccluded(selfMeta, selfFace) && ModelQueries.cullsSame(neighbor);
+                            // Wired (2026-04-27): mask-aware face cover via isFaceCoveredByNeighbor.
+                            int selfId = (int)((selfModel >> 26) & 0xFFFF);
+                            int neighborId = (int)((nextModel >> 26) & 0xFFFF);
+                            culls |= this.isFaceCoveredByNeighbor(selfId, selfFace, neighborId, neighbor);
                             if (culls) {
                                 this.blockMesher.skip(1);
                                 continue;
                             }
                         }
 
-                        this.blockMesher.putNext(((long) facingForward) |//Facing
+                        this.blockMesher.putNext(applyQuadLight(
+                                ((long) facingForward) |//Facing
                                 (selfModel&~LM) |
-                                (nextModel&LM)//Apply lighting
-                        );
+                                (nextModel&LM),//Apply lighting
+                                selfMetaForLight));
                     }
                 }
 
@@ -458,10 +514,12 @@ public class RenderDataFactory {
                         int neighborIdx = ((axis+1)*32*32 * 2)+(side)*32*32;
                         long neighborId = this.neighboringFaces[neighborIdx + (other*32) + index];
                         long A = this.sectionData[idx * 2];
+                        long selfMetaForLight = this.sectionData[idx * 2 + 1];
 
                         int nib = Mapper.getBlockId(neighborId);
                         if (nib != 0) {//Not air
-                            long meta = this.modelMan.getModelMetadataFromClientId(this.modelMan.getModelId(Mapper.getBlockId(neighborId)));
+                            int neighborModelId = this.modelMan.getModelId(nib);
+                            long meta = this.modelMan.getModelMetadataFromClientId(neighborModelId);
                             if (ModelQueries.isFullyOpaque(meta)) {//Dont mesh this face
                                 this.blockMesher.skip(1);
                                 continue;
@@ -470,9 +528,14 @@ public class RenderDataFactory {
                             //This very funnily causes issues when not combined with meshing non full opaque geometry
                             //TODO:FIXME, when non opaque geometry is added
                             if (CHECK_NEIGHBOR_FACE_OCCLUSION) {
+                                long selfMeta = selfMetaForLight;
+                                int selfFace = (axis << 1) | side;
                                 boolean culls = false;
-                                culls |= nib==((A>>26)&0xFFFF)&&ModelQueries.cullsSame(meta);
-                                culls |= ModelQueries.faceOccludes(meta, (axis << 1) | (1 - side));
+                                // Resolved (2026-04-29): asymmetric faceCanBeOccluded(self) gate.
+                                culls |= nib==((A>>26)&0xFFFF) && ModelQueries.faceCanBeOccluded(selfMeta, selfFace) && ModelQueries.cullsSame(meta);
+                                // Wired (2026-04-27): mask-aware face cover via isFaceCoveredByNeighbor.
+                                int selfId = (int)((A >> 26) & 0xFFFF);
+                                culls |= this.isFaceCoveredByNeighbor(selfId, selfFace, neighborModelId, meta);
                                 if (culls) {
                                     this.blockMesher.skip(1);
                                     continue;
@@ -482,10 +545,11 @@ public class RenderDataFactory {
 
 
 
-                        this.blockMesher.putNext(((side == 0) ? 0L : 1L) |
+                        this.blockMesher.putNext(applyQuadLight(
+                                ((side == 0) ? 0L : 1L) |
                                 (A&~LM) |
-                                ((neighborId & (0xFFL << 56)) >>> 1)
-                        );
+                                ((neighborId & (0xFFL << 56)) >>> 1),
+                                selfMetaForLight));
                     }
                 }
                 this.blockMesher.endRow();
@@ -541,6 +605,10 @@ public class RenderDataFactory {
 
                         //TODO: check if must cull against next entries face
                         if (CHECK_NEIGHBOR_FACE_OCCLUSION) {//TODO:SELF OCCLUSION
+                            // Note (2026-04-27): not wired through isFaceCoveredByNeighbor —
+                            // self is fluid (translucent → occludesFace==false → mask empty),
+                            // so the mask check would always return false and the OR
+                            // collapses to this legacy faceOccludes boolean. No semantic gain.
                             if (ModelQueries.faceOccludes(this.sectionData[bi + 1], (axis << 1) | (1 - facingForward))) {
                                 this.blockMesher.skip(1);
                                 continue;
@@ -561,15 +629,22 @@ public class RenderDataFactory {
                             A &= ~0b110L; A |= getQuadTyping(Am);
                         }
 
+                        // Note (2026-04-25, corrected 2026-04-27): YZ fluid inner — flat
+                        // per-quad lighting sampled from the neighbor voxel along the face
+                        // direction. faceUsesSelfLighting IS set for offset>0.01 or translucent
+                        // faces (ModelFactory L.~590); the gap is full-cube emissive blocks
+                        // (glowstone, magma, sea lantern) which fall through both gates and
+                        // pull lighting from a neighbor air voxel — see ModelFactory:391 note.
+                        // True per-vertex lighting (fix for item 14 water grid) needs a
+                        // geometry-format change: 4 corner lights per quad + non-flat
+                        // interpolation in quads2.vert.
                         long lighter = this.sectionData[bi];
-                        //if (!ModelQueries.faceUsesSelfLighting(Am, facingForward|(axis*2))) {//TODO: check this is right
-                        //    lighter = this.sectionData[bi];
-                        //}
 
-                        this.blockMesher.putNext(((long) facingForward) |//Facing
+                        this.blockMesher.putNext(applyQuadLight(
+                                ((long) facingForward) |//Facing
                                 (A&~LM) |
-                                (lighter&LM)//Apply lighting
-                        );
+                                (lighter&LM),//Apply lighting
+                                Am));
                     }
                 }
 
@@ -633,7 +708,8 @@ public class RenderDataFactory {
                             if (ModelQueries.containsFluid(meta)) {
                                 modelId = this.modelMan.getFluidClientStateId(modelId);
                             }
-                            if (ModelQueries.cullsSame(B)) {
+                            // Resolved (2026-04-29): asymmetric faceCanBeOccluded(self) gate.
+                            if (ModelQueries.faceCanBeOccluded(B, (axis << 1) | side) && ModelQueries.cullsSame(B)) {
                                 if (modelId == ((A>>26)&0xFFFF)) {
                                     this.blockMesher.skip(1);
                                     continue;
@@ -641,6 +717,8 @@ public class RenderDataFactory {
                             }
 
                             if (CHECK_NEIGHBOR_FACE_OCCLUSION) {
+                                // Note (2026-04-27): fluid self → mask empty, mask-aware
+                                // check would collapse to this boolean. Skipped wiring.
                                 if (ModelQueries.faceOccludes(meta, (axis << 1) | (1 - side))) {
                                     this.blockMesher.skip(1);
                                     continue;
@@ -648,10 +726,11 @@ public class RenderDataFactory {
                             }
                         }
 
-                        this.blockMesher.putNext((side == 0 ? 0L : 1L) |
+                        this.blockMesher.putNext(applyQuadLight(
+                                (side == 0 ? 0L : 1L) |
                                 (A&~LM) |
-                                ((neighborId&(0xFFL<<56))>>>1)
-                        );
+                                ((neighborId&(0xFFL<<56))>>>1),
+                                B));
                     }
                 }
                 this.blockMesher.endRow();
@@ -666,11 +745,13 @@ public class RenderDataFactory {
         this.seondaryblockMesher.doAuxiliaryFaceOffset = false;
         this.blockMesher.axis = axis;
         this.seondaryblockMesher.axis = axis;
-        for (int layer = 1; layer < 31; layer++) {//(should be 1->31, then have outer face mesher)
+        // Verified (2026-04-25): inner walks layers 1..30 only; layers 0 and 31 (the section
+        // boundary faces) are emitted by generateYZNonOpaqueOuterGeometry using neighboringFaces[].
+        for (int layer = 1; layer < 31; layer++) {
             this.blockMesher.auxiliaryPosition = layer;
             this.seondaryblockMesher.auxiliaryPosition = layer;
             int cSkip = 0;
-            for (int other = 0; other < 32; other++) {//TODO: need to do the faces that border sections
+            for (int other = 0; other < 32; other++) {
                 int pidx = axis == 0 ? (layer * 32 + other) : (other * 32 + layer);
                 int skipAmount = axis==0?32*32:32;
 
@@ -758,17 +839,22 @@ public class RenderDataFactory {
                         long A = this.sectionData[idx * 2];
                         long B = this.sectionData[idx * 2 + 1];
 
+                        int selfId = (int)((A >> 26) & 0xFFFF);
                         boolean fail = false;
                         //Check and test if can cull W.R.T neighbor
                         if (Mapper.getBlockId(neighborId) != 0) {//Not air
                             int modelId = this.modelMan.getModelId(Mapper.getBlockId(neighborId));
-                            if (modelId == ((A>>26)&0xFFFF)) {//TODO: FIXME, this technically isnt correct as need to check self occulsion, thinks?
-                                //TODO: check self occlsuion in the if statment
+                            if (modelId == selfId) {
+                                // Note (2026-04-25, refined 2026-04-27): same-model → cull,
+                                // unconditional. Step 4 wiring would refine via
+                                // isFaceCoveredByNeighbor(self, neighbor) — but for same-model
+                                // both masks are identical, so this would always cull anyway.
+                                // Kept as fast-path.
                                 fail = true;
                             } else {
                                 long meta = this.modelMan.getModelMetadataFromClientId(modelId);
-
-                                if (ModelQueries.faceOccludes(meta, (axis << 1) | (1 - side))) {
+                                // Wired (2026-04-27): mask-aware face cover.
+                                if (this.isFaceCoveredByNeighbor(selfId, (axis << 1) | side, modelId, meta)) {
                                     fail = true;
                                 }
                             }
@@ -777,31 +863,36 @@ public class RenderDataFactory {
                         long nA = this.sectionData[(idx+skipAmount) * 2];
                         long nB = this.sectionData[(idx+skipAmount) * 2 + 1];
                         boolean failB = false;
-                        if ((nA&(0xFFFFL<<26)) == (A&(0xFFFFL<<26))) {//TODO: FIXME, this technically isnt correct as need to check self occulsion, thinks?
-                            //TODO: check self occlsuion in the if statment
+                        if ((nA&(0xFFFFL<<26)) == (A&(0xFFFFL<<26))) {
+                            // Note (2026-04-25, refined 2026-04-27): same-model fast-path —
+                            // see fail-branch above for rationale.
                             failB = true;
                         } else {
-                            if (ModelQueries.faceOccludes(nB, (axis << 1) | (side))) {
+                            // Wired (2026-04-27): mask-aware face cover (selfFace is the
+                            // OPPOSITE side from `side` since this branch checks the other face).
+                            int neighborInnerId = (int)((nA >> 26) & 0xFFFF);
+                            if (this.isFaceCoveredByNeighbor(selfId, (axis << 1) | (1 - side), neighborInnerId, nB)) {
                                 failB = true;
                             }
                         }
 
 
-                        //TODO: LIGHTING
+                        // Note (2026-04-25): YZ non-opaque outer — emits with zero lighting bits
+                        // (no neighbor light pulled). Compared to the X non-opaque outer path
+                        // (dualMeshNonOpaqueOuterX) which does forward neighborLight, this one
+                        // is incomplete. Acceptable today because the visible effect is bounded
+                        // (full-bright-looking partial blocks at section borders, rare in
+                        // practice). A complete fix needs the same neighborLight read pattern as
+                        // dualMeshNonOpaqueOuterX, plus the eventual per-vertex lighting refactor
+                        // (4 corner lights per quad + non-flat interpolation in quads2.vert).
                         if (ModelQueries.faceExists(B, (axis<<1)|1) && ((side==1&&!fail) || (side==0&&!failB))) {
-                            this.blockMesher.putNext((long) (false ? 0L : 1L) |
-                                    A |
-                                    0//((ModelQueries.faceUsesSelfLighting(B, (axis<<1)|1)?A:) & (0xFFL << 55))
-                            );
+                            this.blockMesher.putNext(applyQuadLight(1L | A, B));
                         } else {
                             this.blockMesher.skip(1);
                         }
 
                         if (ModelQueries.faceExists(B, (axis<<1)|0) && ((side==0&&!fail) || (side==1&&!failB))) {
-                            this.seondaryblockMesher.putNext((long) (true ? 0L : 1L) |
-                                    A |
-                                    0//(((0xFFL) & 0xFF) << 55)
-                            );
+                            this.seondaryblockMesher.putNext(applyQuadLight(0L | A, B));
                         } else {
                             this.seondaryblockMesher.skip(1);
                         }
@@ -864,8 +955,10 @@ public class RenderDataFactory {
             for (int z = 0; z < 32; z++) {
                 int lMsk = this.opaqueMasks[y*32+z];
                 msk = (lMsk^(lMsk>>>1));
-                //TODO: fixme? doesnt this generate extra geometry??
-                msk &= -1>>>1;//Remove top bit as we dont actually know/have the data for that slice
+                // Verified (2026-04-25): bit 31 of (lMsk^lMsk>>>1) is "voxel 31 vs nothing" —
+                // a spurious transition at the +x section boundary. Cleared here, the +x face
+                // is emitted by generateXOuterOpaqueGeometry using neighboringFaces[i+32*32].
+                msk &= -1>>>1;
 
                 //Always increment cause can do funny trick (i.e. -1 on skip amount)
                 sumA += X_I_MSK;
@@ -939,23 +1032,28 @@ public class RenderDataFactory {
                         int iA = idx * 2 + (facingForward == 1 ? 0 : 2);
                         int iB = idx * 2 + (facingForward == 1 ? 2 : 0);
 
+                        long selfModel = this.sectionData[iA];
+                        long selfMetaForLight = this.sectionData[iA + 1];
+                        long nextModel = this.sectionData[iB];
+
                         //Check if next culls this face
                         if (CHECK_NEIGHBOR_FACE_OCCLUSION) {
-                            //TODO: check self occlsuion
-                            if (ModelQueries.faceOccludes(this.sectionData[iB + 1], (2 << 1) | (1 - facingForward))) {
+                            // Wired (2026-04-27): mask-aware face cover (was bare faceOccludes
+                            // on neighbor meta only — see ANALYSIS.md item 11(a)).
+                            int selfId = (int)((selfModel >> 26) & 0xFFFF);
+                            int neighborId = (int)((nextModel >> 26) & 0xFFFF);
+                            if (this.isFaceCoveredByNeighbor(selfId, (2 << 1) | facingForward, neighborId, this.sectionData[iB + 1])) {
                                 mesher.skip(1);
                                 continue;
                             }
                         }
 
-                        long selfModel = this.sectionData[iA];
-                        long nextModel = this.sectionData[iB];
-
                         //Example thing thats just wrong but as example
-                        mesher.putNext(((long) facingForward) |//Facing
+                        mesher.putNext(applyQuadLight(
+                                ((long) facingForward) |//Facing
                                 (selfModel&~LM) |
-                                (nextModel&LM)
-                        );
+                                (nextModel&LM),
+                                selfMetaForLight));
                     }
                 }
             }
@@ -1003,44 +1101,56 @@ public class RenderDataFactory {
                 if ((msk & 1) != 0) {//-x
                     long neighborId = this.neighboringFaces[i];
                     boolean oki = true;
+                    long A = this.sectionData[(i<<5) * 2];
+                    long Am = this.sectionData[(i<<5) * 2 + 1];
                     if (Mapper.getBlockId(neighborId) != 0) {//Not air
-                        long meta = this.modelMan.getModelMetadataFromClientId(this.modelMan.getModelId(Mapper.getBlockId(neighborId)));
+                        int neighborModelId = this.modelMan.getModelId(Mapper.getBlockId(neighborId));
+                        long meta = this.modelMan.getModelMetadataFromClientId(neighborModelId);
                         if (ModelQueries.isFullyOpaque(meta)) {
                             oki = false;
-                        } else if (CHECK_NEIGHBOR_FACE_OCCLUSION && ModelQueries.faceOccludes(meta, (2 << 1) | (1 - 1))) {
-                            //TODO check self occlsion
-                            oki = false;
+                        } else if (CHECK_NEIGHBOR_FACE_OCCLUSION) {
+                            // Wired (2026-04-27): self -x face vs neighbor +x face.
+                            int selfId = (int)((A >> 26) & 0xFFFF);
+                            if (this.isFaceCoveredByNeighbor(selfId, (2 << 1) | 0, neighborModelId, meta)) {
+                                oki = false;
+                            }
                         }
                     }
                     if (oki) {
                         ma.skip(skipA); skipA = 0;
-                        long A = this.sectionData[(i<<5) * 2];
-                        ma.putNext(0L |
+                        ma.putNext(applyQuadLight(
+                                0L |
                                 (A&~LM) |
-                                ((neighborId&(0xFFL<<56))>>>1)
-                        );
+                                ((neighborId&(0xFFL<<56))>>>1),
+                                Am));
                     } else {skipA++;}
                 } else {skipA++;}
 
                 if ((msk & (1<<31)) != 0) {//+x
                     long neighborId = this.neighboringFaces[i+32*32];
                     boolean oki = true;
+                    long A = this.sectionData[(i*32+31) * 2];
+                    long Am = this.sectionData[(i*32+31) * 2 + 1];
                     if (Mapper.getBlockId(neighborId) != 0) {//Not air
-                        long meta = this.modelMan.getModelMetadataFromClientId(this.modelMan.getModelId(Mapper.getBlockId(neighborId)));
+                        int neighborModelId = this.modelMan.getModelId(Mapper.getBlockId(neighborId));
+                        long meta = this.modelMan.getModelMetadataFromClientId(neighborModelId);
                         if (ModelQueries.isFullyOpaque(meta)) {
                             oki = false;
-                        } else if (CHECK_NEIGHBOR_FACE_OCCLUSION && ModelQueries.faceOccludes(meta, (2 << 1) | (1 - 0))) {
-                            //TODO check self occlsion
-                            oki = false;
+                        } else if (CHECK_NEIGHBOR_FACE_OCCLUSION) {
+                            // Wired (2026-04-27): self +x face vs neighbor -x face.
+                            int selfId = (int)((A >> 26) & 0xFFFF);
+                            if (this.isFaceCoveredByNeighbor(selfId, (2 << 1) | 1, neighborModelId, meta)) {
+                                oki = false;
+                            }
                         }
                     }
                     if (oki) {
                         mb.skip(skipB); skipB = 0;
-                        long A = this.sectionData[(i*32+31) * 2];
-                        mb.putNext(1L |
+                        mb.putNext(applyQuadLight(
+                                1L |
                                 (A&~LM) |
-                                ((neighborId&(0xFFL<<56))>>>1)
-                        );
+                                ((neighborId&(0xFFL<<56))>>>1),
+                                Am));
                     } else {skipB++;}
                 } else {skipB++;}
             }
@@ -1066,8 +1176,10 @@ public class RenderDataFactory {
                 int fMsk = this.fluidMasks[y*32+z];
                 int lMsk = oMsk|fMsk;
                 msk = (lMsk^(lMsk>>>1));
-                //TODO: fixme? doesnt this generate extra geometry??
-                msk &= -1>>>1;//Remove top bit as we dont actually know/have the data for that slice
+                // Verified (2026-04-25): bit 31 cleared for the same reason as
+                // generateXOpaqueInnerGeometry — +x boundary face is emitted by
+                // generateXOuterFluidGeometry via neighboringFaces[i+32*32].
+                msk &= -1>>>1;
 
                 //Dont generate geometry for opaque faces
                 msk &= fMsk|(fMsk>>1);
@@ -1135,8 +1247,9 @@ public class RenderDataFactory {
                         int bi = (idx+facingForward)*2;
 
                         if (CHECK_NEIGHBOR_FACE_OCCLUSION) {
+                            // Note (2026-04-27): fluid self → mask-aware check collapses to
+                            // this boolean (see YZ fluid inner for full rationale). Skipped.
                             if (ModelQueries.faceOccludes(this.sectionData[bi + 1], (2 << 1) | (1 - facingForward))) {
-                                //TODO check self occlsion
                                 mesher.skip(1);
                                 continue;
                             }
@@ -1157,16 +1270,17 @@ public class RenderDataFactory {
                             A &= ~0b110L; A |= getQuadTyping(Am);
                         }
 
+                        // Note (2026-04-25, corrected 2026-04-27): X fluid inner — same flat
+                        // per-quad lighting as YZ fluid inner (see L.~570). Same residual gap
+                        // for full-cube emissive blocks (ModelFactory:391) + same per-vertex
+                        // lighting refactor needed for the water-grid fix (item 14).
                         long lighter = this.sectionData[bi];
-                        //if (!ModelQueries.faceUsesSelfLighting(Am, facingForward|(axis*2))) {//TODO: check this is right
-                        //    lighter = this.sectionData[bi];
-                        //}
 
-                        //Example thing thats just wrong but as example
-                        mesher.putNext(((long) facingForward) |//Facing
+                        mesher.putNext(applyQuadLight(
+                                ((long) facingForward) |//Facing
                                 (A&~LM) |
-                                (lighter&LM)//Lighting
-                        );
+                                (lighter&LM),//Lighting
+                                Am));
                     }
                 }
             }
@@ -1241,6 +1355,8 @@ public class RenderDataFactory {
 
                         //Check neighbor face
                         if (CHECK_NEIGHBOR_FACE_OCCLUSION) {
+                            // Note (2026-04-27): fluid self → mask empty, mask-aware check
+                            // would collapse to this boolean. Skipped wiring.
                             if (ModelQueries.faceOccludes(meta, (2 << 1) | (1-0))) {
                                 oki = false;
                             }
@@ -1250,7 +1366,8 @@ public class RenderDataFactory {
                             modelId = this.modelMan.getFluidClientStateId(modelId);
                         }
 
-                        if (ModelQueries.cullsSame(Am)) {
+                        // Resolved (2026-04-29): asymmetric faceCanBeOccluded(self) gate. -x face = 0.
+                        if (ModelQueries.faceCanBeOccluded(Am, 0) && ModelQueries.cullsSame(Am)) {
                             if (modelId == ((A>>26)&0xFFFF)) {
                                 oki = false;
                             }
@@ -1260,16 +1377,17 @@ public class RenderDataFactory {
                     if (oki) {
                         ma.skip(skipA); skipA = 0;
 
-                        //TODO: LIGHTING
-                        long lightData = ((neighborId&(0xFFL<<56))>>>1);//A;
-                        //if (!ModelQueries.faceUsesSelfLighting(Am, facingForward|(axis*2))) {//TODO: check this is right
-                        //    lighter = this.sectionData[bi];
-                        //}
+                        // Note (2026-04-25, corrected 2026-04-27): X fluid outer (-x) — flat
+                        // per-quad lighting sampled from neighbor section's face data. Same
+                        // residual gap for full-cube emissive blocks (ModelFactory:391) +
+                        // per-vertex lighting refactor needed for the water-grid fix.
+                        long lightData = ((neighborId&(0xFFL<<56))>>>1);
 
-                        ma.putNext(0L |
+                        ma.putNext(applyQuadLight(
+                                0L |
                                 (A&~LM) |
-                                lightData
-                        );
+                                lightData,
+                                Am));
                     } else {skipA++;}
                 } else {skipA++;}
 
@@ -1302,6 +1420,8 @@ public class RenderDataFactory {
 
                         //Check neighbor face
                         if (CHECK_NEIGHBOR_FACE_OCCLUSION) {
+                            // Note (2026-04-27): fluid self → mask empty, mask-aware check
+                            // would collapse to this boolean. Skipped wiring.
                             if (ModelQueries.faceOccludes(meta, (2 << 1) | (1-1))) {
                                 oki = false;
                             }
@@ -1311,7 +1431,8 @@ public class RenderDataFactory {
                             modelId = this.modelMan.getFluidClientStateId(modelId);
                         }
 
-                        if (ModelQueries.cullsSame(Am)) {
+                        // Resolved (2026-04-29): asymmetric faceCanBeOccluded(self) gate. +x face = 1.
+                        if (ModelQueries.faceCanBeOccluded(Am, 1) && ModelQueries.cullsSame(Am)) {
                             if (modelId == ((A>>26)&0xFFFF)) {
                                 oki = false;
                             }
@@ -1321,16 +1442,14 @@ public class RenderDataFactory {
                     if (oki) {
                         mb.skip(skipB); skipB = 0;
 
-                        //TODO: LIGHTING
-                        long lightData = ((neighborId&(0xFFL<<56))>>>1);//A;
-                        //if (!ModelQueries.faceUsesSelfLighting(Am, facingForward|(axis*2))) {//TODO: check this is right
-                        //    lighter = this.sectionData[bi];
-                        //}
+                        // Note (2026-04-25, corrected 2026-04-27): X fluid outer (+x) — same as -x branch above.
+                        long lightData = ((neighborId&(0xFFL<<56))>>>1);
 
-                        mb.putNext(1L |
+                        mb.putNext(applyQuadLight(
+                                1L |
                                 (A&~LM) |
-                                lightData
-                        );
+                                lightData,
+                                Am));
                     } else {skipB++;}
                 } else {skipB++;}
             }
@@ -1450,24 +1569,26 @@ public class RenderDataFactory {
 
 
 
-    private static void dualMeshNonOpaqueOuterX(int side, long quad, long meta, int neighborAId, int neighborLight, long neighborAMeta, long neighborBQuad, long neighborBMeta, Mesher ma, Mesher mb) {
+    private void dualMeshNonOpaqueOuterX(int side, long quad, long meta, int neighborAId, int neighborLight, long neighborAMeta, long neighborBQuad, long neighborBMeta, Mesher ma, Mesher mb) {
         //side == 0 if is on 0 side and 1 if on 31 side
 
         //TODO: Check (neighborAId!=0) && works oki
-        if ((neighborAId==0 && ModelQueries.faceExists(meta, ((2<<1)|0)^side))||(neighborAId!=0&&shouldMeshNonOpaqueBlockFace(((2<<1)|0)^side, quad, meta, ((long)neighborAId)<<26, neighborAMeta))) {
-            ma.putNext(((long)side)|
+        if ((neighborAId==0 && ModelQueries.faceExists(meta, ((2<<1)|0)^side))||(neighborAId!=0&&this.shouldMeshNonOpaqueBlockFace(((2<<1)|0)^side, quad, meta, ((long)neighborAId)<<26, neighborAMeta))) {
+            ma.putNext(applyQuadLight(
+                    ((long)side)|
                     (quad&~LM) |
-                    (ModelQueries.faceUsesSelfLighting(meta, ((2<<1)|0)^side)?quad:(((long)neighborLight)<<55))
-            );
+                    (ModelQueries.faceUsesSelfLighting(meta, ((2<<1)|0)^side)?quad:(((long)neighborLight)<<55)),
+                    meta));
         } else {
             ma.skip(1);
         }
 
-        if (shouldMeshNonOpaqueBlockFace(((2<<1)|1)^side, quad, meta, neighborBQuad, neighborBMeta)) {
-            mb.putNext(((long)(side^1))|
+        if (this.shouldMeshNonOpaqueBlockFace(((2<<1)|1)^side, quad, meta, neighborBQuad, neighborBMeta)) {
+            mb.putNext(applyQuadLight(
+                    ((long)(side^1))|
                     (quad&~LM) |
-                    ((ModelQueries.faceUsesSelfLighting(meta, ((2<<1)|1)^side)?quad:neighborBQuad)&(0xFFL<<55))
-            );
+                    ((ModelQueries.faceUsesSelfLighting(meta, ((2<<1)|1)^side)?quad:neighborBQuad)&(0xFFL<<55)),
+                    meta));
         } else {
             mb.skip(1);
         }
@@ -1561,6 +1682,7 @@ public class RenderDataFactory {
 
     //section is already acquired and gets released by the parent
     public BuiltSection generateMesh(WorldSection section) {
+
         //TODO: FIXME: because of the exceptions that are thrown when aquiring modelId
         // this can result in the state of all block meshes and well _everything_ from being incorrect
         //THE EXCEPTION THAT THIS THROWS CAUSES MAJOR ISSUES

@@ -21,6 +21,10 @@ import org.apache.commons.compress.archivers.zip.ZipFile;
 import org.lwjgl.system.MemoryUtil;
 
 import com.mojang.serialization.Codec;
+import com.mojang.serialization.Dynamic;
+import net.minecraft.SharedConstants;
+import net.minecraft.util.datafix.DataFixers;
+import net.minecraft.util.datafix.fixes.References;
 
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.thread.Service;
@@ -435,7 +439,29 @@ public class WorldImporter implements IDataImporter {
         }
     }
 
+    private static CompoundTag upgradeChunkNbt(CompoundTag chunk) {
+        int currentVersion = SharedConstants.getCurrentVersion().getDataVersion().getVersion();
+        int chunkVersion = chunk.contains("DataVersion") ? chunk.getInt("DataVersion") : -1;
+        if (chunkVersion >= currentVersion || chunkVersion < 0) {
+            return chunk;
+        }
+        try {
+            var fixed = DataFixers.getDataFixer()
+                    .update(References.CHUNK, new Dynamic<>(NbtOps.INSTANCE, chunk), chunkVersion, currentVersion)
+                    .getValue();
+            if (fixed instanceof CompoundTag fixedCompound) {
+                return fixedCompound;
+            }
+            Logger.warn("DataFixerUpper returned non-compound for chunk upgrade (DataVersion " + chunkVersion + ")");
+        } catch (Exception e) {
+            Logger.error("DataFixerUpper failed to upgrade chunk from DataVersion " + chunkVersion, e);
+        }
+        return chunk;
+    }
+
     private void importChunkNBT(CompoundTag chunk, int regionX, int regionZ) {
+        chunk = upgradeChunkNbt(chunk);
+
         if (!chunk.contains("Status")) {
             //Its not real so decrement the chunk
             this.totalChunks.decrementAndGet();
@@ -494,7 +520,8 @@ public class WorldImporter implements IDataImporter {
 
         var blockStatesRes = blockStateCodec.parse(NbtOps.INSTANCE, section.getCompound("block_states"));
         if (!blockStatesRes.hasResultOrPartial()) {
-            //TODO: if its only partial, it means should try to upgrade the nbt format with datafixerupper probably
+            // Resolved (2026-04-17): chunk NBT now runs through DataFixerUpper at importChunkNBT entry,
+            // so a parse miss here is genuinely unrecoverable (corrupt or unknown future schema).
             return;
         }
         var blockStates = blockStatesRes.getPartialOrThrow();

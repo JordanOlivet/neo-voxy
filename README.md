@@ -32,7 +32,7 @@ Neo-Voxy is a NeoForge port of the Voxy mod, a far-distance rendering mod utiliz
 | Minecraft | `1.21.1` |
 | NeoForge | `21.1.77+` |
 | Sodium | `0.6.0+` (NeoForge edition) |
-| Iris | Required (NeoForge edition) |
+| Iris | Optional (for shader support, NeoForge edition) |
 
 ## Installation
 
@@ -64,7 +64,6 @@ The following mixins from the original Fabric Voxy have been **removed** in this
 ### Other Removed Mixins
 | Mixin | Purpose |
 |-------|---------|
-| `iris.MixinStandardMacros` | Iris shader macro definitions |
 | `minecraft.MixinBlockableEventLoop` | Client thread event loop hooks |
 | `minecraft.MixinGlDebug` | OpenGL debugging utilities |
 
@@ -74,8 +73,8 @@ The following mixins from the original Fabric Voxy have been **removed** in this
 
 ### Client Mixins (`voxy.mixins.json`)
 
-**Minecraft Core (13 mixins)**
-- `MixinWorld`, `MixinClientChunkCache`, `MixinClientCommonPacketListenerImpl`
+**Minecraft Core (10 mixins)**
+- `MixinClientChunkCache`, `MixinClientCommonPacketListenerImpl`
 - `MixinClientLevel`, `MixinClientPacketListener`, `MixinFogRenderer`
 - `MixinLevelRenderer`, `MixinMinecraft`, `MixinRenderSystem`
 - `MixinWindow`, `MixinLayerLightSectionStorage`
@@ -85,11 +84,12 @@ The following mixins from the original Fabric Voxy have been **removed** in this
 - `MixinChunkJobQueue`, `MixinDefaultChunkRenderer`
 - `MixinRenderSectionManager`, `MixinSodiumOptionsGUI`, `MixinSodiumWorldRenderer`
 
-**Iris Integration (10 mixins)**
+**Iris Integration (11 mixins)**
 - `CustomUniformsAccessor`, `IrisRenderingPipelineAccessor`
 - `MixinIris`, `MixinIrisRenderingPipeline`, `MixinIrisSamplers`
 - `MixinLevelRenderer`, `MixinMatrixUniforms`
 - `MixinPackRenderTargetDirectives`, `MixinProgramSet`, `MixinShaderPackSourceNames`
+- `MixinStandardMacros`
 
 ### Common Mixins (`voxy-common.mixins.json`)
 - `MixinLevelCommon` - Server/common level hooks
@@ -129,6 +129,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ---
 
-**Version**: `0.2.0`  
+**Version**: `1.0.0`  
 **Minecraft**: `1.21.1`  
 **Mod Loader**: NeoForge `21.1.77+`
+
+> **Lignée** : basé sur [Voxy](https://github.com/MCRcortex/voxy) `0.2.9-alpha` (Fabric, MC 1.21.11), backporté vers MC 1.21.1 / NeoForge. Le versioning de ce fork est indépendant de l'upstream depuis le portage.

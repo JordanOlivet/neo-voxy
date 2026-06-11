@@ -1,5 +1,5 @@
 plugins {
-    id 'dev.architectury.loom' version '1.7-SNAPSHOT'
+    id 'dev.architectury.loom' version '1.10-SNAPSHOT'
     id 'maven-publish'
     id "com.github.johnrengelman.shadow" version "8.1.1"
 }
@@ -67,8 +67,11 @@ dependencies {
     neoForge "net.neoforged:neoforge:${project.neoforge_version}"
 
     // Sodium for NeoForge (required dependency)
-    modCompileOnly "maven.modrinth:sodium:mc1.21.1-0.6.13-neoforge"
-    modRuntimeOnly "maven.modrinth:sodium:mc1.21.1-0.6.13-neoforge"
+    modImplementation "maven.modrinth:sodium:mc1.21.1-0.6.13-neoforge"
+    // Sodium's bundled JarJars (service + Fabric API renderer modules)
+    // Loom dev environment doesn't extract NeoForge JarJars at runtime, so add them explicitly
+    runtimeOnly fileTree(dir: "libs", include: "*.jar")
+    forgeRuntimeLibrary fileTree(dir: "libs", include: "*.jar")
 
     // Optional: Iris shaders support
     modCompileOnly("maven.modrinth:iris:1.8.0+1.21.1-neoforge")
@@ -76,8 +79,13 @@ dependencies {
     // Optional: Lithium support (for LithiumHashPalette compatibility)
     modCompileOnly("maven.modrinth:lithium:mc1.21.1-0.15.0-neoforge")
 
-    // Optional: Nvidium support
+    // Optional: Nvidium support — no NeoForge build for 1.21.1 published as of 2026-04
     //modCompileOnly "maven.modrinth:nvidium:0.3.0-beta"
+
+    // Optional: Chunky integration (auto-ingest generated chunks into Voxy).
+    // Modrinth Maven resolves "chunky:1.4.23" to the Forge jar; the NeoForge jar
+    // (containing NeoForgeWorld) is stored locally under libs/chunky-nf/.
+    modCompileOnly fileTree(dir: "libs/chunky-nf", include: "*.jar")
 }
 
 shadowJar {
@@ -133,4 +141,22 @@ dependencies {
     compileOnly 'org.lz4:lz4-java:1.8.0'
     bundle(implementation('org.tukaani:xz:1.10')) { transitive = false }
     forgeRuntimeLibrary 'org.tukaani:xz:1.10'
+    // sqlite-jdbc: required for DHImporter (Distant Horizons SQLite databases)
+    bundle(implementation('org.xerial:sqlite-jdbc:3.46.1.3')) { transitive = false }
+    forgeRuntimeLibrary 'org.xerial:sqlite-jdbc:3.46.1.3'
+
+    // Test dependencies
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testImplementation 'org.lz4:lz4-java:1.8.0'
+    testRuntimeOnly "org.lwjgl:lwjgl:$lwjglVersion:natives-windows"
+    testRuntimeOnly "org.lwjgl:lwjgl:$lwjglVersion:natives-linux"
+    testRuntimeOnly "org.lwjgl:lwjgl-zstd:$lwjglVersion:natives-windows"
+    testRuntimeOnly "org.lwjgl:lwjgl-zstd:$lwjglVersion:natives-linux"
+    testRuntimeOnly "org.lwjgl:lwjgl-lmdb:$lwjglVersion:natives-windows"
+    testRuntimeOnly "org.lwjgl:lwjgl-lmdb:$lwjglVersion:natives-linux"
+}
+
+test {
+    useJUnitPlatform()
 }

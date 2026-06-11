@@ -3,3 +3,12 @@
 /build/
 /run/
 /.idea/
+.claude
+dist
+logs
+/libs
+build.bat
+server_test
+.vscode
+_build-and-deploy.bat
+_run-test-server.bat.lnk

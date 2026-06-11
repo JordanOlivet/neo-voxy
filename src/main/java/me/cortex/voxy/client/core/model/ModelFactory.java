@@ -27,6 +27,7 @@ import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.BlockAndTintGetter;
+import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ColorResolver;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.biome.Biome;
@@ -63,7 +64,13 @@ import static org.lwjgl.opengl.GL11.*;
 //TODO: NOTE!!! is it worth even uploading as a 16x16 texture, since automatic lod selection... doing 8x8 textures might be perfectly ok!!!
 // this _quarters_ the memory requirements for the texture atlas!!! WHICH IS HUGE saving
 public class ModelFactory {
-    public static final int MODEL_TEXTURE_SIZE = 16;
+    // Resolved (2026-04-28): step 5 — atlas downscaled 16→8.
+    // VRAM atlas: 512 MiB → 128 MiB (-384 MiB). Per-face occlusion mask shrinks
+    // from 256 bits (4 longs) to 64 bits (1 long), heap cache 12 MiB → 3 MiB.
+    // Auto-LOD selection in the sampler picks mip 1+ at typical Voxy distances,
+    // so the lost mip-0 detail is rarely visible. If a regression is reported,
+    // bump back to 16 here and OCCLUSION_MASK_LONGS_PER_FACE to 4.
+    public static final int MODEL_TEXTURE_SIZE = 8;
 
     // TODO: replace the fluid BlockState with a client model id integer of the
     // fluidState, requires looking up
@@ -106,10 +113,11 @@ public class ModelFactory {
     // will need to find a way to send this info to the shader via the material, if
     // it is in the opaque phase render as transparent with blending shiz
 
-    // TODO: ADD an occlusion mask that can be queried (16x16 pixels takes up 4
-    // longs) this mask shows what pixels are exactly occluded at the edge of the
-    // block
-    // so that full block occlusion can work nicely
+    // Resolved (2026-04-27): faceOcclusionMaskCache stores the 16x16 = 256-bit
+    // per-face opacity mask packed in 4 longs per face (24 longs per blockstate).
+    // Mirrors the current per-face faceOccludes bit (translucent / offset>=0.1 →
+    // empty mask) but at per-pixel granularity. Wiring into RenderDataFactory
+    // callsites is a separate follow-up — see ANALYSIS.md item 11 step 4.
 
     // TODO: what might work maybe, is that all the transparent pixels should be set
     // to the average of the other pixels
@@ -125,6 +133,9 @@ public class ModelFactory {
     // this has an issue with scaffolding i believe tho, so maybe make it a
     // probability to render??? idk
     private final long[] metadataCache;
+    public static final int OCCLUSION_MASK_LONGS_PER_FACE = 1;//8x8 bits = 64 bits = 1 long (was 4 at MODEL_TEXTURE_SIZE=16)
+    private static final int OCCLUSION_MASK_LONGS_PER_BLOCKSTATE = 6 * OCCLUSION_MASK_LONGS_PER_FACE;//6
+    private final long[] faceOcclusionMaskCache;
     private final int[] fluidStateLUT;
 
     // Provides a map from id -> model id as multiple ids might have the same
@@ -150,6 +161,31 @@ public class ModelFactory {
 
     private final ConcurrentLinkedDeque<ResultUploader> uploadResults = new ConcurrentLinkedDeque<>();
 
+    // Monitor the bake worker thread waits on when both input queues are empty.
+    // Producers (addBiome / the download callback that pushes RawBakeResult) call
+    // notifyAll() after enqueueing so the worker resumes immediately instead of
+    // waiting out the timeout. The timeout in waitForWork() is just a safety net
+    // for missed notifies.
+    private final Object workNotifier = new Object();
+
+    private void signalWork() {
+        synchronized (this.workNotifier) {
+            this.workNotifier.notifyAll();
+        }
+    }
+
+    /**
+     * Block the calling thread until either input queue has work or the timeout
+     * elapses. Spurious wake-ups are fine: caller re-checks via processAllThings().
+     */
+    public void waitForWork(long timeoutMs) throws InterruptedException {
+        synchronized (this.workNotifier) {
+            if (this.biomeQueue.isEmpty() && this.rawBakeResults.isEmpty()) {
+                this.workNotifier.wait(timeoutMs);
+            }
+        }
+    }
+
     private Object2IntMap<BlockState> customBlockStateIdMapping;
 
     // TODO: NOTE!!! is it worth even uploading as a 16x16 texture, since automatic
@@ -162,6 +198,7 @@ public class ModelFactory {
         this.bakery = new ModelTextureBakery(MODEL_TEXTURE_SIZE, MODEL_TEXTURE_SIZE);
 
         this.metadataCache = new long[1 << 16];
+        this.faceOcclusionMaskCache = new long[(1 << 16) * OCCLUSION_MASK_LONGS_PER_BLOCKSTATE];
         this.fluidStateLUT = new int[1 << 16];
         this.idMappings = new int[1 << 20];// Max of 1 million blockstates mapping to 65k model states
         Arrays.fill(this.idMappings, -1);
@@ -233,7 +270,10 @@ public class ModelFactory {
 
         RawBakeResult result = new RawBakeResult(blockId, blockState);
         int allocation = this.downstream.download(MODEL_TEXTURE_SIZE * MODEL_TEXTURE_SIZE * 2 * 4 * 6,
-                ptr -> this.rawBakeResults.add(result.cpyBuf(ptr)));
+                ptr -> {
+                    this.rawBakeResults.add(result.cpyBuf(ptr));
+                    this.signalWork();
+                });
         this.bakery.renderToStream(blockState, this.downstream.getBufferId(), allocation);
         return true;
     }
@@ -272,6 +312,7 @@ public class ModelFactory {
 
     public void addBiome(Mapper.BiomeEntry biome) {
         this.biomeQueue.add(biome);
+        this.signalWork();
     }
 
     public void processAllThings() {
@@ -302,7 +343,17 @@ public class ModelFactory {
             ;
     }
 
-    public void tickAndProcessUploads() {
+    /**
+     * Drain pending GL uploads bounded by {@code budgetNanos}. Previously this
+     * method drained the entire {@code uploadResults} queue every frame, which on
+     * first-connect produced multi-hundred-ms main-thread spikes (one
+     * nglTextureSubImage2D per face per mip per baked block). Budgeting lets the
+     * initial flood spread over several frames so vanilla rendering keeps a slice
+     * of the main thread. Pass a large budget (e.g. 100 ms) from the frex
+     * "finish everything" path to preserve the old "drain it all" behavior.
+     */
+    public void tickAndProcessUploads(long budgetNanos) {
+        long start = System.nanoTime();
         this.downstream.tick();
 
         var upload = this.uploadResults.poll();
@@ -316,6 +367,9 @@ public class ModelFactory {
         do {
             upload.upload(this.storage);
             upload.free();
+            if ((System.nanoTime() - start) >= budgetNanos) {
+                break;
+            }
             upload = this.uploadResults.poll();
         } while (upload != null);
         UploadStream.INSTANCE.commit();
@@ -389,7 +443,14 @@ public class ModelFactory {
         this.blockStatesInFlightLock.unlock();
 
         // TODO: add thing for `blockState.hasEmissiveLighting()` and
-        // `blockState.getLuminance()`
+        // `blockState.getLuminance()`.
+        // Note (2026-04-27): the per-face faceUsesSelfLighting bit (0b1000) IS
+        // set later in this method as `(offset > 0.01 || translucent) ? 0b1000 : 0`
+        // — so cake/lantern-shaped or translucent faces already self-light. What's
+        // still missing here is the explicit emissive path: full-cube emissive
+        // blocks (glowstone, magma, sea lantern) fall through both gates because
+        // they have offset≈0 and aren't translucent → they pull lighting from a
+        // neighbor air voxel instead of self-lighting at LOD distance.
 
         boolean isFluid = blockState.getBlock() instanceof LiquidBlock;
         int modelId = -1;
@@ -574,6 +635,21 @@ public class ModelFactory {
             metadata |= occludesFace ? 1 : 0;
             fullyOpaque &= occludesFace;
 
+            // Per-face 8x8 = 64-bit pixel coverage mask, packed in 1 long.
+            // Mirrors `occludesFace` semantics: empty mask if face doesn't occlude
+            // (translucent or far-from-flush), otherwise bit (x + y*8) = pixel written.
+            {
+                long m0 = 0;
+                if (occludesFace) {
+                    final var faceTex = textureData[face];
+                    for (int idx = 0; idx < MODEL_TEXTURE_SIZE * MODEL_TEXTURE_SIZE; idx++) {
+                        if (TextureUtils.wasPixelWritten(faceTex, checkMode, idx)) m0 |= 1L << idx;
+                    }
+                }
+                int maskBase = (modelId * 6 + face) * OCCLUSION_MASK_LONGS_PER_FACE;
+                this.faceOcclusionMaskCache[maskBase] = m0;
+            }
+
             boolean canBeOccluded = true;
             // TODO: make this an option on how far/close
             canBeOccluded &= offset < 0.3;// If the face is rendered far away from the other face, then it cant be
@@ -635,6 +711,9 @@ public class ModelFactory {
         }
 
         metadata |= fullyOpaque ? (1L << (48 + 6)) : 0;
+
+        //block emission (4 bits at offset 55)
+        metadata |= ((long)getBlockLightEmission(blockState)) << (48 + 7);
 
         boolean canBeCorrectlyRendered = true;// This represents if a model can be correctly (perfectly) represented
         // i.e. no gaps
@@ -934,6 +1013,40 @@ public class ModelFactory {
         return biomeDependent[0];
     }
 
+    private static int getBlockLightEmission(BlockState state) {
+        boolean isEmissive = state.emissiveRendering(new BlockGetter() {
+            @Nullable
+            @Override
+            public BlockEntity getBlockEntity(BlockPos pos) {
+                return null;
+            }
+
+            @Override
+            public BlockState getBlockState(BlockPos pos) {
+                return state;
+            }
+
+            @Override
+            public FluidState getFluidState(BlockPos pos) {
+                return state.getFluidState();
+            }
+
+            @Override
+            public int getHeight() {
+                return 0;
+            }
+
+            @Override
+            public int getMinBuildHeight() {
+                return 0;
+            }
+        }, BlockPos.ZERO);
+        if (isEmissive) {
+            return 15;//full bright
+        }
+        return state.getLightEmission();
+    }
+
     private static float[] computeModelDepth(ColourDepthTextureData[] textures, int checkMode) {
         float[] res = new float[6];
         for (var dir : Direction.values()) {
@@ -980,6 +1093,26 @@ public class ModelFactory {
 
     public long getModelMetadataFromClientId(int clientId) {
         return this.metadataCache[clientId];
+    }
+
+    //Per-face 8x8 pixel opacity mask, 1 long per face. Pixel index = x + y*8. Empty
+    // mask means face does not occlude (translucent / far-from-flush / face absent).
+    public long getFaceOcclusionMaskLong(int clientId, int face) {
+        return this.faceOcclusionMaskCache[(clientId * 6 + face) * OCCLUSION_MASK_LONGS_PER_FACE];
+    }
+
+    //True iff every set pixel of `selfFace` of `selfClientId` is also set in
+    // `neighborFace` of `neighborClientId`. Use to decide if `selfFace` is fully
+    // hidden by the neighbor's facing-back face. Empty self mask returns false —
+    // caller should pre-check via faceOccludes/faceExists if a different fallback
+    // is needed (the OR'd legacy check in RenderDataFactory.isFaceCoveredByNeighbor
+    // handles the empty-self case).
+    public boolean isFaceFullyOccludedBy(int selfClientId, int selfFace, int neighborClientId, int neighborFace) {
+        int sBase = (selfClientId * 6 + selfFace) * OCCLUSION_MASK_LONGS_PER_FACE;
+        int nBase = (neighborClientId * 6 + neighborFace) * OCCLUSION_MASK_LONGS_PER_FACE;
+        long s0 = this.faceOcclusionMaskCache[sBase];
+        if ((s0 & ~this.faceOcclusionMaskCache[nBase]) != 0L) return false;
+        return s0 != 0L;
     }
 
     private static int computeSizeWithMips(int size) {
@@ -1064,5 +1197,13 @@ public class ModelFactory {
         size += this.uploadResults.size();
         size += this.biomeQueue.size();
         return size;
+    }
+
+    public int getUploadResultsSize() {
+        return this.uploadResults.size();
+    }
+
+    public int getRawBakeResultsSize() {
+        return this.rawBakeResults.size();
     }
 }

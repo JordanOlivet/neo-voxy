@@ -1,6 +1,8 @@
 package me.cortex.voxy.common.network;
 
+import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.common.Logger;
+import net.minecraft.client.Minecraft;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.neoforge.network.PacketDistributor;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
@@ -116,9 +118,94 @@ public class VoxyNetworkHandler {
 
     /**
      * Send a payload to the server (client→server).
+     * <p>
+     * Defensive: returns {@code false} (instead of throwing) when the channel is
+     * not negotiated on the active connection (e.g. vanilla server). Callers may
+     * use the return value to detect lack of server-side mod support.
      */
-    public static void sendToServer(VoxyPacketPayload payload) {
-        PacketDistributor.sendToServer(payload);
+    public static boolean sendToServer(VoxyPacketPayload payload) {
+        try {
+            if (!hasServerSupport()) {
+                return false;
+            }
+            PacketDistributor.sendToServer(payload);
+            return true;
+        } catch (Throwable t) {
+            Logger.warn("sendToServer failed (treating server as having no Voxy channel): " + t.getMessage());
+            serverSupportCached = Boolean.FALSE;
+            return false;
+        }
+    }
+
+    // Cached per-connection. Reset by resetConnectionState() on disconnect.
+    private static volatile Boolean serverSupportCached = null;
+
+    /**
+     * Check whether the active client connection has negotiated the Voxy payload
+     * channel (i.e. the server has the mod installed).
+     */
+    public static boolean hasServerSupport() {
+        Boolean cached = serverSupportCached;
+        if (cached != null) {
+            return cached;
+        }
+        var mc = Minecraft.getInstance();
+        if (mc == null) {
+            return false;
+        }
+        var listener = mc.getConnection();
+        if (listener == null) {
+            return false;
+        }
+        boolean result;
+        try {
+            result = listener.hasChannel(VoxyPacketPayload.TYPE);
+        } catch (Throwable t) {
+            result = false;
+        }
+        serverSupportCached = result;
+        return result;
+    }
+
+    /**
+     * Clear cached connection state (call on disconnect / world transition).
+     */
+    public static void resetConnectionState() {
+        serverSupportCached = null;
+    }
+
+    /**
+     * Push the local Voxy render-distance to the server so it can clamp its
+     * streaming radius accordingly. Safe to call when no server channel is
+     * negotiated — it returns {@code false} silently.
+     */
+    public static boolean sendClientHint() {
+        int chunks = Math.max(1, VoxyConfig.CONFIG.sectionRenderDistance) * 32;
+        return sendToServer(VoxyPacketPayload.clientHint(chunks));
+    }
+
+    /**
+     * Resolve the effective multiplayer mode after considering server capability.
+     * <ul>
+     * <li>{@code AUTO} → {@code SERVER_STREAM} if server has the mod, else {@code CLIENT_ONLY}.</li>
+     * <li>Other values returned as-is.</li>
+     * </ul>
+     */
+    public static VoxyConfig.MultiplayerMode getEffectiveMode() {
+        if (isSinglePlayer()) {
+            // Singleplayer is always handled by the integrated server's chunk-load path.
+            return VoxyConfig.MultiplayerMode.SERVER_STREAM;
+        }
+        VoxyConfig.MultiplayerMode forced = VoxyConfig.CONFIG.multiplayerMode;
+        if (forced == VoxyConfig.MultiplayerMode.CLIENT_ONLY) {
+            return VoxyConfig.MultiplayerMode.CLIENT_ONLY;
+        }
+        if (forced == VoxyConfig.MultiplayerMode.SERVER_STREAM) {
+            return VoxyConfig.MultiplayerMode.SERVER_STREAM;
+        }
+        return hasServerSupport()
+                ? VoxyConfig.MultiplayerMode.SERVER_STREAM
+                : VoxyConfig.MultiplayerMode.CLIENT_ONLY;
     }
 
     // ==================== //

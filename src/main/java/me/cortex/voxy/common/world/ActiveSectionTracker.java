@@ -8,10 +8,15 @@ import org.jetbrains.annotations.Nullable;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.util.Arrays;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.StampedLock;
 
 public class ActiveSectionTracker {
+
+    // Package-private so tests can shorten the timeouts deterministically.
+    static long spinWarnNanos = TimeUnit.SECONDS.toNanos(10);
+    static long spinThrowNanos = TimeUnit.SECONDS.toNanos(60);
 
     //Deserialize into the supplied section, returns true on success, false on failure
     public interface SectionLoader {int load(WorldSection section);}
@@ -174,9 +179,24 @@ public class ActiveSectionTracker {
             }
             return section;
         } else {
-            //TODO: mark the time the loading started in nanos, then here if it has been a while, spin lock, else jump back to the executing service and do work
+            // TODO: jump back to the executing service and do work instead of spin-waiting once the wait
+            // exceeds a short budget. (Timeout fail-fast added 2026-04-17: warn at 10s, IllegalStateException at 60s.)
             VarHandle.fullFence();
+            long spinStart = System.nanoTime();
+            boolean warned = false;
             while ((section = holder.obj) == null) {
+                long elapsed = System.nanoTime() - spinStart;
+                if (!warned && elapsed > spinWarnNanos) {
+                    Logger.warn("ActiveSectionTracker: section load stuck > "
+                            + TimeUnit.NANOSECONDS.toSeconds(spinWarnNanos) + "s for key "
+                            + WorldEngine.pprintPos(key));
+                    warned = true;
+                }
+                if (elapsed > spinThrowNanos) {
+                    throw new IllegalStateException("Section load stuck > "
+                            + TimeUnit.NANOSECONDS.toSeconds(spinThrowNanos) + "s for key "
+                            + WorldEngine.pprintPos(key));
+                }
                 VarHandle.fullFence();
                 Thread.onSpinWait();
                 Thread.yield();

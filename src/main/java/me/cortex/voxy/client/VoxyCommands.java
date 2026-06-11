@@ -1,26 +1,37 @@
 package me.cortex.voxy.client;
 
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.suggestion.Suggestions;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
+import it.unimi.dsi.fastutil.longs.Long2ReferenceMap;
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
 import me.cortex.voxy.client.core.LodReceptionService;
+import me.cortex.voxy.client.core.rendering.ChunkBoundRenderer;
+import me.cortex.voxy.client.mixin.sodium.AccessorRenderSectionManager;
+import me.cortex.voxy.client.mixin.sodium.AccessorSodiumWorldRenderer;
+import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.network.VoxyNetworkHandler;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
 import me.cortex.voxy.commonImpl.importers.DHImporter;
 import me.cortex.voxy.commonImpl.importers.WorldImporter;
+import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
+import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
+import net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
+import net.minecraft.core.SectionPos;
 import net.minecraft.network.chat.Component;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.concurrent.CompletableFuture;
 
 public class VoxyCommands {
@@ -54,11 +65,206 @@ public class VoxyCommands {
         }
 
         return Commands.literal("voxy")
+                .executes(VoxyCommands::showHelp)
+                .then(Commands.literal("help")
+                        .executes(VoxyCommands::showHelp))
                 .then(Commands.literal("reload")
                         .executes(VoxyCommands::reloadInstance))
                 .then(Commands.literal("sync")
                         .executes(VoxyCommands::syncLod))
+                .then(Commands.literal("debugBounds")
+                        .executes(VoxyCommands::toggleDebugBounds))
+                .then(Commands.literal("dumpbounds")
+                        .executes(ctx -> dumpBounds(ctx, -1))
+                        .then(Commands.argument("radius", IntegerArgumentType.integer(0, 64))
+                                .executes(ctx -> dumpBounds(ctx, IntegerArgumentType.getInteger(ctx, "radius")))))
+                .then(Commands.literal("dumpAtlas")
+                        .executes(VoxyCommands::dumpAtlas))
                 .then(imports);
+    }
+
+    private static int showHelp(CommandContext<CommandSourceStack> ctx) {
+        var src = ctx.getSource();
+        src.sendSystemMessage(Component.literal("§6=== Voxy client commands ==="));
+        src.sendSystemMessage(Component.literal("§e/voxy help §7- show this list"));
+        src.sendSystemMessage(Component.literal("§e/voxy reload §7- tear down and recreate the client Voxy instance (storage, render system, network). Use after corrupted local state or to apply config changes that need a full restart."));
+        src.sendSystemMessage(Component.literal("§e/voxy sync §7- request a fresh LOD sync from the server (re-issues the handshake; the server resends mapper + restreams the current radius). Use when LODs look stale or partial."));
+        src.sendSystemMessage(Component.literal("§e/voxy debugBounds §7- toggle the rendering of ChunkBoundRenderer's tracked vanilla-RD bounding boxes for debugging."));
+        src.sendSystemMessage(Component.literal("§e/voxy dumpbounds [radius] §7- dump (to chat + log) the per-section tracked/orphan/missing state around the player. Default radius = RD+3 sections."));
+        src.sendSystemMessage(Component.literal("§e/voxy dumpAtlas §7- write the Voxy model atlas (mip 0) to <gameDir>/voxy-atlas-<timestamp>.png. Useful to verify the baked textures."));
+        src.sendSystemMessage(Component.literal("§6Import (local ingest from other LOD mods/worlds):"));
+        src.sendSystemMessage(Component.literal("§e/voxy import world <name> §7- import a vanilla world save by folder name."));
+        src.sendSystemMessage(Component.literal("§e/voxy import bobby <name> §7- import a Bobby LOD cache by world name."));
+        src.sendSystemMessage(Component.literal("§e/voxy import raw <path> §7- import raw section data from a directory path."));
+        src.sendSystemMessage(Component.literal("§e/voxy import zip <zipPath> [innerPath] §7- import from a ZIP archive."));
+        if (DHImporter.HasRequiredLibraries) {
+            src.sendSystemMessage(Component.literal("§e/voxy import distant_horizons <sqlDbPath> §7- import a Distant Horizons sqlite DB (path to .sqlite file)."));
+        }
+        src.sendSystemMessage(Component.literal("§e/voxy import cancel §7- cancel an in-progress import."));
+        return 1;
+    }
+
+    // Dumps the Voxy model atlas (mip 0) to <gameDir>/voxy-atlas-<timestamp>.png.
+    // Used to verify alpha preservation through the GPU bake for translucent
+    // blocks (ice, glass) — open the PNG and inspect ice tile's alpha channel.
+    private static int dumpAtlas(CommandContext<CommandSourceStack> ctx) {
+        var mc = Minecraft.getInstance();
+        var wr = mc.levelRenderer;
+        if (!(wr instanceof IGetVoxyRenderSystem vrs)) {
+            ctx.getSource().sendFailure(Component.literal("Voxy render system not available"));
+            return 1;
+        }
+        var renderSystem = vrs.getVoxyRenderSystem();
+        if (renderSystem == null) {
+            ctx.getSource().sendFailure(Component.literal("Voxy render system not initialized"));
+            return 1;
+        }
+        String stamp = new java.text.SimpleDateFormat("yyyy-MM-dd_HH.mm.ss").format(new java.util.Date());
+        File out = new File(mc.gameDirectory, "voxy-atlas-" + stamp + ".png");
+        try {
+            boolean ok = renderSystem.dumpModelAtlas(out);
+            if (ok) {
+                ctx.getSource().sendSystemMessage(Component.literal("Atlas dumped: " + out.getAbsolutePath()));
+                return 0;
+            } else {
+                ctx.getSource().sendFailure(Component.literal("Atlas dump failed (see log)"));
+                return 1;
+            }
+        } catch (Throwable t) {
+            Logger.error("dumpAtlas failed", t);
+            ctx.getSource().sendFailure(Component.literal("Atlas dump threw: " + t.getMessage()));
+            return 1;
+        }
+    }
+
+    private static int dumpBounds(CommandContext<CommandSourceStack> ctx, int radiusArg) {
+        var mc = Minecraft.getInstance();
+        var wr = mc.levelRenderer;
+        if (!(wr instanceof IGetVoxyRenderSystem vrs)) {
+            ctx.getSource().sendFailure(Component.literal("Voxy render system not available"));
+            return 1;
+        }
+        var renderSystem = vrs.getVoxyRenderSystem();
+        if (renderSystem == null) {
+            ctx.getSource().sendFailure(Component.literal("Voxy render system not initialized"));
+            return 1;
+        }
+
+        int rd = mc.options.getEffectiveRenderDistance();
+        int radius = radiusArg < 0 ? rd + 3 : radiusArg;
+
+        var player = mc.player;
+        if (player == null) {
+            ctx.getSource().sendFailure(Component.literal("No player"));
+            return 1;
+        }
+        int pcx = SectionPos.blockToSectionCoord(player.getBlockX());
+        int pcy = SectionPos.blockToSectionCoord(player.getBlockY());
+        int pcz = SectionPos.blockToSectionCoord(player.getBlockZ());
+
+        long[] tracked = renderSystem.chunkBoundRenderer._debugGetTrackedPositions();
+        Arrays.sort(tracked);
+
+        SodiumWorldRenderer sodium = SodiumWorldRenderer.instanceNullable();
+        RenderSectionManager mgr = null;
+        Long2ReferenceMap<RenderSection> sectionMap = null;
+        if (sodium != null) {
+            mgr = ((AccessorSodiumWorldRenderer) sodium).getRenderSectionManager();
+            if (mgr != null) {
+                sectionMap = ((AccessorRenderSectionManager) mgr).getSectionByPosition();
+            }
+        }
+
+        int totalTracked = tracked.length;
+        int withinRadius = 0;
+        int orphanCount = 0;
+        int phantomCount = 0;
+        int invisibleCount = 0;
+        int ringMin = Math.max(0, rd - 2);
+        int ringMax = rd + 3;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== /voxy dumpbounds ===\n");
+        sb.append("playerSection=(").append(pcx).append(',').append(pcy).append(',').append(pcz).append(')')
+                .append(" effectiveRD=").append(rd)
+                .append(" radius=").append(radius)
+                .append(" totalTracked=").append(totalTracked)
+                .append(" sodiumAvail=").append(sodium != null)
+                .append(" sectionMapAvail=").append(sectionMap != null).append('\n');
+        sb.append("Sodium flags: bit0=BLOCK_GEOMETRY, bit1=BLOCK_ENTITIES, bit2=ANIMATED_SPRITES.\n");
+        sb.append("ORPHAN = tracked but Sodium has no built section. PHANTOM = built but flags=0 or NO BLOCK_GEOMETRY -> AABB writes depth without vanilla pixels behind it (likely cause of invisible LOD).\n");
+
+        int shown = 0;
+        for (long pos : tracked) {
+            int sx = SectionPos.x(pos);
+            int sy = SectionPos.y(pos);
+            int sz = SectionPos.z(pos);
+            int dx = sx - pcx;
+            int dz = sz - pcz;
+            int dy = sy - pcy;
+            int chebXZ = Math.max(Math.abs(dx), Math.abs(dz));
+            if (chebXZ > radius) continue;
+            withinRadius++;
+            boolean sodiumBuilt = sodium == null || sodium.isSectionReady(sx, sy, sz);
+            boolean sodiumVisible = mgr == null || mgr.isSectionVisible(sx, sy, sz);
+            int flags = -1;
+            if (sectionMap != null) {
+                RenderSection rs = sectionMap.get(pos);
+                if (rs != null) flags = rs.getFlags();
+            }
+            boolean hasBlockGeo = flags > 0 && (flags & 1) != 0;
+            boolean inRing = chebXZ >= ringMin && chebXZ <= ringMax;
+            String tag;
+            if (sodium != null && !sodiumBuilt) {
+                tag = "ORPHAN";
+                orphanCount++;
+            } else if (sectionMap != null && sodiumBuilt && !hasBlockGeo) {
+                tag = "PHANTOM";
+                phantomCount++;
+            } else if (mgr != null && !sodiumVisible) {
+                tag = "INVISIBLE";
+                invisibleCount++;
+            } else if (inRing) {
+                tag = "EDGE";
+            } else {
+                tag = "";
+            }
+            sb.append("  (").append(sx).append(',').append(sy).append(',').append(sz).append(')')
+                    .append(" d=(").append(dx).append(',').append(dy).append(',').append(dz).append(')')
+                    .append(" chebXZ=").append(chebXZ)
+                    .append(" built=").append(sodiumBuilt)
+                    .append(" visible=").append(sodiumVisible)
+                    .append(" flags=").append(flags);
+            if (!tag.isEmpty()) sb.append(' ').append(tag);
+            sb.append('\n');
+            shown++;
+        }
+        sb.append("withinRadius=").append(withinRadius)
+                .append(" shown=").append(shown)
+                .append(" orphans=").append(orphanCount)
+                .append(" phantoms=").append(phantomCount)
+                .append(" invisible=").append(invisibleCount);
+
+        String dump = sb.toString();
+        Logger.info(dump);
+        ctx.getSource().sendSystemMessage(Component.literal(
+                "dumpbounds: tracked=" + totalTracked + " withinRadius=" + withinRadius
+                        + " orphans=" + orphanCount + " phantoms=" + phantomCount
+                        + " invisible=" + invisibleCount + " (full output in log)"));
+        return 0;
+    }
+
+    // Diagnosis tool for the phantom-occlusion bug (see ChunkBoundRenderer.java).
+    // Toggles AABB rasterization on/off at runtime. If toggling makes invisible
+    // LOD chunks reappear → confirmed phantom-occlusion → consider whether the
+    // option-B chebyshev edge-ring skip in outline.vsh still covers the case, or
+    // whether option A (tight per-section bounds) is now warranted.
+    private static int toggleDebugBounds(CommandContext<CommandSourceStack> ctx) {
+        boolean now = !ChunkBoundRenderer.DEBUG_DISABLE_DEPTH_BOUNDS;
+        ChunkBoundRenderer.DEBUG_DISABLE_DEPTH_BOUNDS = now;
+        ctx.getSource().sendSystemMessage(Component.literal(
+                "ChunkBoundRenderer depth-bounds rasterization: " + (now ? "DISABLED" : "ENABLED")));
+        return 0;
     }
 
     private static int reloadInstance(CommandContext<CommandSourceStack> ctx) {

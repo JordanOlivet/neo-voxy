@@ -4,6 +4,7 @@ import me.cortex.voxy.client.ICheekyClientChunkCache;
 import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
 import me.cortex.voxy.client.core.VoxyRenderSystem;
+import me.cortex.voxy.common.util.ModLoaderUtil;
 import me.cortex.voxy.common.world.service.VoxelIngestService;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import net.caffeinemc.mods.sodium.client.gl.device.CommandList;
@@ -29,8 +30,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(value = RenderSectionManager.class, remap = false)
 public class MixinRenderSectionManager {
+    // When Bobby is present, chunk-removal ingest is handled by MixinClientChunkCache.drop
+    // instead (Bobby keeps the chunk data accessible later than this hook), so we
+    // skip the standard path here to avoid double-ingest.
     @Unique
-    private static final boolean BOBBY_INSTALLED = false;
+    private static final boolean BOBBY_INSTALLED = ModLoaderUtil.isModLoaded("bobby");
 
     @Shadow
     @Final

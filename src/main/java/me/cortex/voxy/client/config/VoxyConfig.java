@@ -3,6 +3,7 @@ package me.cortex.voxy.client.config;
 import com.google.gson.FieldNamingPolicy;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import me.cortex.voxy.client.core.SSAO;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.cpu.CpuLayout;
 import me.cortex.voxy.commonImpl.VoxyCommon;
@@ -24,17 +25,52 @@ public class VoxyConfig implements OptionStorage<VoxyConfig> {
 
     public static VoxyConfig CONFIG = loadOrCreate();
 
+    /**
+     * How the client should behave when joining a multiplayer server.
+     * <ul>
+     * <li>{@code AUTO} — detect at connect time. Server has Voxy → use server
+     * streaming. No Voxy → ingest local chunks.</li>
+     * <li>{@code CLIENT_ONLY} — always ingest locally, ignore any server-side
+     * Voxy. Useful as an escape hatch when the server streams too slowly.</li>
+     * <li>{@code SERVER_STREAM} — require server-side Voxy. If absent, disable
+     * Voxy rendering with a chat warning.</li>
+     * </ul>
+     */
+    public enum MultiplayerMode { AUTO, CLIENT_ONLY, SERVER_STREAM }
+
     public boolean enabled = true;
     public boolean enableRendering = true;
     public boolean ingestEnabled = true;
+    public MultiplayerMode multiplayerMode = MultiplayerMode.AUTO;
     public int sectionRenderDistance = 16;
     public int serviceThreads = (int) Math.max(CpuLayout.getCoreCount() / 1.5, 1);
     public float subDivisionSize = 64;
     public boolean renderVanillaFog = false;
     public boolean renderStatistics = false;
-    public boolean dontUseSodiumBuilderThreads = false;
+    // Default flipped 2026-05-14: subtracting Sodium's builder thread count from
+    // serviceThreads left Voxy with as little as 1 worker on machines where
+    // Sodium claims most cores (observed: 11 services - 10 sodium = 1 voxy
+    // worker), which serialised the mesh-generation "retry path" during the
+    // first-connect bake storm and produced multi-second stalls. Letting Voxy
+    // use its full serviceThreads pool gives the bake/remap pipeline real
+    // parallelism. If a user reports vanilla chunk meshing being starved by
+    // Voxy, they can flip this back off in the config UI.
+    public boolean dontUseSodiumBuilderThreads = true;
+    public boolean debugDumpOnScreenshot = false;
+    public boolean logGapDiag = false;
+    /**
+     * When {@code true}, opens a 60s "first-connect" diagnostic window each time
+     * the client sends a LOD sync request. During the window {@link
+     * me.cortex.voxy.common.VoxyDiag} emits a 1Hz snapshot of the bake / pending
+     * / received / applied counters and timing logs for hot main-thread paths
+     * that exceed configured thresholds. Disabled by default — turn on only to
+     * investigate first-connect stalls; otherwise leaves the log untouched.
+     */
+    public boolean diagFirstConnect = false;
+    public SSAO.SSAOMode ssaoMode = SSAO.SSAOMode.AUTO;
 
     private static VoxyConfig loadOrCreate() {
+        VoxyConfig result;
         if (VoxyCommon.isAvailable()) {
             var path = getConfigPath();
             if (Files.exists(path)) {
@@ -42,6 +78,7 @@ public class VoxyConfig implements OptionStorage<VoxyConfig> {
                     var conf = GSON.fromJson(reader, VoxyConfig.class);
                     if (conf != null) {
                         conf.save();
+                        me.cortex.voxy.common.VoxyDiag.setEnabled(conf.diagFirstConnect);
                         return conf;
                     } else {
                         Logger.error("Failed to load voxy config, resetting");
@@ -50,20 +87,21 @@ public class VoxyConfig implements OptionStorage<VoxyConfig> {
                     Logger.error("Could not parse config", e);
                 }
             }
-            var config = new VoxyConfig();
-            config.save();
-            return config;
+            result = new VoxyConfig();
+            result.save();
         } else {
-            var config = new VoxyConfig();
-            config.enabled = false;
-            config.enableRendering = false;
-            return config;
+            result = new VoxyConfig();
+            result.enabled = false;
+            result.enableRendering = false;
         }
+        me.cortex.voxy.common.VoxyDiag.setEnabled(result.diagFirstConnect);
+        return result;
     }
 
     public void save() {
         try {
             Files.writeString(getConfigPath(), GSON.toJson(this));
+            me.cortex.voxy.common.VoxyDiag.setEnabled(this.diagFirstConnect);
         } catch (IOException e) {
             Logger.error("Failed to write config file", e);
         }

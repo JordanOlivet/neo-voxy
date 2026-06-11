@@ -180,6 +180,8 @@ public class SaveLoadSystem {
                 return false;
             }
         }
+        //Deserialize filled all 32768 voxel slots — section is complete, bypass the ingestion gate.
+        section._unsafeSetFullyIngested();
         return true;
     }
 }

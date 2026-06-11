@@ -1,50 +1,53 @@
-// package me.cortex.voxy.client;
+package me.cortex.voxy.client;
 
-// import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
-// import me.cortex.voxy.client.core.VoxyRenderSystem;
-// import me.cortex.voxy.commonImpl.VoxyCommon;
-// import net.minecraft.ChatFormatting;
-// import net.minecraft.client.Minecraft;
-// import net.minecraft.client.gui.components.debug.DebugScreenDisplayer;
-// import net.minecraft.client.gui.components.debug.DebugScreenEntry;
-// import net.minecraft.resources.ResourceLocation;
-// import net.minecraft.world.level.Level;
-// import net.minecraft.world.level.chunk.LevelChunk;
-// import org.jetbrains.annotations.Nullable;
+import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
+import me.cortex.voxy.client.core.VoxyRenderSystem;
+import me.cortex.voxy.commonImpl.VoxyCommon;
+import net.minecraft.ChatFormatting;
+import net.minecraft.client.Minecraft;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.neoforge.client.event.CustomizeGuiOverlayEvent;
 
-// import java.util.ArrayList;
-// import java.util.List;
+import java.util.ArrayList;
+import java.util.List;
 
-// public class VoxyDebugScreenEntry implements DebugScreenEntry {
-//     @Override
-//     public void display(DebugScreenDisplayer lines, @Nullable Level world, @Nullable LevelChunk clientChunk, @Nullable LevelChunk chunk) {
-//         if (!VoxyCommon.isAvailable()) {
-//             lines.addLine(ChatFormatting.RED + "voxy-"+VoxyCommon.MOD_VERSION);//Voxy installed, not avalible
-//             return;
-//         }
-//         var instance = VoxyCommon.getInstance();
-//         if (instance == null) {
-//             lines.addLine(ChatFormatting.YELLOW + "voxy-" + VoxyCommon.MOD_VERSION);//Voxy avalible, no instance active
-//             return;
-//         }
-//         VoxyRenderSystem vrs = null;
-//         var wr = Minecraft.getInstance().levelRenderer;
-//         if (wr != null) vrs = ((IGetVoxyRenderSystem) wr).getVoxyRenderSystem();
+//F3 debug-screen contributor. Hooks NeoForge's CustomizeGuiOverlayEvent.DebugText (the 1.21.1
+// equivalent of Fabric's DebugScreenEntry) and appends Voxy instance + render-system lines,
+// including the RenderStatistics counters when the toggle is on.
+public class VoxyDebugScreenEntry {
 
-//         //Voxy instance active
-//         lines.addLine((vrs==null?ChatFormatting.DARK_GREEN:ChatFormatting.GREEN)+"voxy-"+VoxyCommon.MOD_VERSION);
+    @SubscribeEvent
+    public static void onDebugText(CustomizeGuiOverlayEvent.DebugText event) {
+        if (!Minecraft.getInstance().getDebugOverlay().showDebugScreen()) return;
 
-//         //lines.addLineToSection();
-//         List<String> instanceLines = new ArrayList<>();
-//         instance.addDebug(instanceLines);
-//         lines.addToGroup(ResourceLocation.fromNamespaceAndPath("voxy", "instance_debug"), instanceLines);
+        List<String> lines = event.getRight();
 
-//         if (vrs != null) {
-//             List<String> renderLines = new ArrayList<>();
-//             vrs.addDebugInfo(renderLines);
-//             lines.addToGroup(ResourceLocation.fromNamespaceAndPath("voxy", "render_debug"), renderLines);
-//         }
-//     }
+        if (!VoxyCommon.isAvailable()) {
+            lines.add(ChatFormatting.RED + "voxy-" + VoxyCommon.MOD_VERSION);
+            return;
+        }
+        var instance = VoxyCommon.getInstance();
+        if (instance == null) {
+            lines.add(ChatFormatting.YELLOW + "voxy-" + VoxyCommon.MOD_VERSION);
+            return;
+        }
 
+        VoxyRenderSystem vrs = null;
+        var wr = Minecraft.getInstance().levelRenderer;
+        if (wr instanceof IGetVoxyRenderSystem holder) {
+            vrs = holder.getVoxyRenderSystem();
+        }
 
-// }
+        lines.add((vrs == null ? ChatFormatting.DARK_GREEN : ChatFormatting.GREEN) + "voxy-" + VoxyCommon.MOD_VERSION);
+
+        List<String> instanceLines = new ArrayList<>();
+        instance.addDebug(instanceLines);
+        lines.addAll(instanceLines);
+
+        if (vrs != null) {
+            List<String> renderLines = new ArrayList<>();
+            vrs.addDebugInfo(renderLines);
+            lines.addAll(renderLines);
+        }
+    }
+}

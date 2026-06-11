@@ -1,0 +1,12 @@
+{
+    "required": false,
+    "package": "me.cortex.voxy.common.mixin.chunky",
+    "compatibilityLevel": "JAVA_21",
+    "minVersion": "0.8",
+    "mixins": [
+        "MixinNeoForgeWorld"
+    ],
+    "injectors": {
+        "defaultRequire": 0
+    }
+}

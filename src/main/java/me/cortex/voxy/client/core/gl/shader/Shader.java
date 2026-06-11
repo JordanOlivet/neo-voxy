@@ -124,6 +124,15 @@ public class Shader extends TrackedObject {
             return this;
         }
 
+        // Replace a literal marker (e.g. "%%CONST_ARRAY%%") in every loaded source.
+        // Useful for injecting generated GLSL fragments at compile time.
+        public Builder<T> replace(String marker, String replacement) {
+            for (var entry : this.sources.entrySet()) {
+                entry.setValue(entry.getValue().replace(marker, replacement));
+            }
+            return this;
+        }
+
 
         private int compileToProgram() {
             int program = GL20C.glCreateProgram();

@@ -21,6 +21,8 @@ public final class WorldSection {
     private static final VarHandle NON_EMPTY_BLOCK_HANDLE;
     private static final VarHandle IN_SAVE_QUEUE_HANDLE;
     private static final VarHandle IS_DIRTY_HANDLE;
+    private static final VarHandle INGESTED_OCTANT_HANDLE;
+    private static final VarHandle VERSION_HANDLE;
 
     static {
         try {
@@ -29,6 +31,8 @@ public final class WorldSection {
             NON_EMPTY_BLOCK_HANDLE = MethodHandles.lookup().findVarHandle(WorldSection.class, "nonEmptyBlockCount", int.class);
             IN_SAVE_QUEUE_HANDLE = MethodHandles.lookup().findVarHandle(WorldSection.class, "inSaveQueue", boolean.class);
             IS_DIRTY_HANDLE = MethodHandles.lookup().findVarHandle(WorldSection.class, "isDirty", boolean.class);
+            INGESTED_OCTANT_HANDLE = MethodHandles.lookup().findVarHandle(WorldSection.class, "ingestedOctantMask", byte.class);
+            VERSION_HANDLE = MethodHandles.lookup().findVarHandle(WorldSection.class, "version", long.class);
         } catch (NoSuchFieldException | IllegalAccessException e) {
             throw new RuntimeException(e);
         }
@@ -54,10 +58,22 @@ public final class WorldSection {
     long[] data = null;
     volatile int nonEmptyBlockCount = 0;//Note: only needed for level 0 sections
     volatile byte nonEmptyChildren;
+    //Bitmask of which of the 8 octants (2x2x2 halves) of this section have received at least one
+    // VoxelizedSection ingest. Mesh generation is gated on this reaching 0xFF to avoid rendering
+    // transparent sections while ingestion is still progressing. Set to 0xFF directly when loaded
+    // from disk (deserialize fills all 32768 voxel slots).
+    volatile byte ingestedOctantMask;
 
     final ActiveSectionTracker tracker;
     volatile boolean inSaveQueue;
     volatile boolean isDirty;
+    // Monotonic counter, seeded from {@link #GLOBAL_VERSION_SEED} on construction
+    // and {@link #primeForReuse()} and bumped by every {@link WorldEngine#markDirty}
+    // call. Streaming uses this to detect that a section has changed since the
+    // last time it was sent to a given client, so the server can resend an updated
+    // copy without tracking per-(section,player) state.
+    @SuppressWarnings("unused")
+    volatile long version = 0;
 
     //When the first bit is set it means its loaded
     @SuppressWarnings("all")
@@ -77,10 +93,43 @@ public final class WorldSection {
         } else {
             ARRAY_REUSE_CACHE_COUNT.decrementAndGet();
         }
+        // version is left at its declared default (0). Previously this
+        // constructor seeded it from a process-wide monotonic counter
+        // (GLOBAL_VERSION_SEED) on the theory that "freshly allocated sections
+        // never look older than already sent to the streamer". That was wrong
+        // in steady state: under bandwidth pressure the LRU secondary cache
+        // (capacity ~1024) cycles sections in and out faster than the async
+        // save service can persist them; an evicted-then-reloaded section
+        // would land here with a fresh, monotonically-larger version even
+        // though its voxel data was identical to the copy the streamer
+        // already sent the player, and the streamer's lastSent-vs-version
+        // check would happily resend it. With this constructor at 0, a clean
+        // reload from disk goes through {@link SaveLoadSystem3#deserialize}
+        // which calls {@link #_unsafeSetVersion(long)} to restore whatever
+        // version was persisted (the on-disk format has carried
+        // {@code META_BIT_HAS_VERSION} since the streaming layer was added,
+        // so all saves include it), and an unsaved-yet-reloaded section
+        // stays at 0 — strictly less than any value the streamer has already
+        // recorded in {@code lastSentVersion}, so the version-check correctly
+        // suppresses the redundant resend.
     }
 
     void primeForReuse() {
         ATOMIC_STATE_HANDLE.set(this, 1);
+        // Previously this also bumped the version via GLOBAL_VERSION_SEED, on the
+        // theory that the section was about to be "populated again" by the
+        // ingest path. That was wrong: when a section is pulled back out of the
+        // LRU secondary cache it is the exact same {@link WorldSection} instance
+        // with the exact same voxel array — no overwrite happens here. Bumping
+        // the version anyway made the streamer treat every LRU recycle as a new
+        // payload, which on the active ring (~9.6k sections at radius 32ch)
+        // generated a steady ~1800-section-per-second resend storm forever after
+        // the initial sync finished. {@link WorldUpdater#insertUpdate} already
+        // calls {@code markDirty} (and therefore {@link #bumpVersion}) when the
+        // ingest pipeline actually writes new voxel data; that is the only
+        // path that should change the version, and the streamer's version
+        // gating now correctly settles into steady-state once a player's
+        // streaming ring is fully filled.
     }
 
     public long[] _unsafeGetRawDataArray() {
@@ -274,6 +323,34 @@ public final class WorldSection {
         NON_EMPTY_CHILD_HANDLE.set(this, nonEmptyChildren);
     }
 
+    //Marks the given octant (0..7, layout: (x&1) | ((z&1)<<1) | ((y&1)<<2)) as having received at
+    // least one ingest. Monotonic (bits only set, never cleared). Returns true iff this call was
+    // the one that transitioned the mask to fully-ingested (0xFF).
+    public boolean markOctantIngested(int octantIdx) {
+        byte bit = (byte) (1 << (octantIdx & 7));
+        byte prev, next;
+        do {
+            prev = (byte) INGESTED_OCTANT_HANDLE.get(this);
+            next = (byte) (prev | bit);
+            if (prev == next) return false;
+        } while (!INGESTED_OCTANT_HANDLE.compareAndSet(this, prev, next));
+        return (next & 0xFF) == 0xFF && (prev & 0xFF) != 0xFF;
+    }
+
+    public boolean isFullyIngested() {
+        return ((byte) INGESTED_OCTANT_HANDLE.get(this)) == (byte) 0xFF;
+    }
+
+    public byte getIngestedOctantMask() {
+        return (byte) INGESTED_OCTANT_HANDLE.get(this);
+    }
+
+    //Used by the disk-load path: deserialize writes all 32768 slots so the section is immediately
+    // complete regardless of whether VoxelIngestService has caught up.
+    public void _unsafeSetFullyIngested() {
+        INGESTED_OCTANT_HANDLE.set(this, (byte) 0xFF);
+    }
+
     public static WorldSection _createRawUntrackedUnsafeSection(int lvl, int x, int y, int z) {
         return new WorldSection(lvl, x, y, z, null);
     }
@@ -284,6 +361,24 @@ public final class WorldSection {
 
     public void markDirty() {
         IS_DIRTY_HANDLE.getAndSet(this, true);
+    }
+
+    public long getVersion() {
+        return (long) VERSION_HANDLE.getVolatile(this);
+    }
+
+    public long bumpVersion() {
+        return ((long) VERSION_HANDLE.getAndAdd(this, 1L)) + 1L;
+    }
+
+    /**
+     * Restore a previously-persisted version. Only used by {@link SaveLoadSystem3}
+     * right after a disk load: the section's data is being replaced wholesale so
+     * the {@code primeForReuse()} seed is irrelevant, and we want clients to see
+     * "same content ⇒ same version" across LRU eviction and reload.
+     */
+    void _unsafeSetVersion(long v) {
+        VERSION_HANDLE.set(this, v);
     }
 
     public boolean setNotDirty() {

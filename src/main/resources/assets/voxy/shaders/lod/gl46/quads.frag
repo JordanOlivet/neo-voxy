@@ -13,6 +13,7 @@ layout(binding = 0) uniform sampler2D blockModelAtlas;
 layout(binding = 2) uniform sampler2D depthTex;
 
 //#define DEBUG_RENDER
+//#define GAP_DEBUG_RENDER
 
 //TODO: need to fix when merged quads have discardAlpha set to false but they span multiple tiles
 // however they are not a full block
@@ -20,6 +21,9 @@ layout(binding = 2) uniform sampler2D depthTex;
 layout(location = 0) in flat uvec4 interData;
 #ifndef USE_NV_BARRY
 layout(location = 1) in vec2 uv;
+#endif
+#ifdef GAP_DEBUG_RENDER
+layout(location = 6) in float fragDist;
 #endif
 
 #ifdef DEBUG_RENDER
@@ -59,11 +63,6 @@ uint getFace() {
     return (interData.x>>4)&7u;
 }
 
-#ifdef PATCHED_SHADER
-vec2 getLightmap() {
-    return clamp(vec2((interData.y>>4)&0xFu, interData.y&0xFu)/15, vec2(8.0f/256), vec2(248.0f/256));
-}
-#endif
 
 uint getModelId() {
     return interData.x>>16;
@@ -181,6 +180,14 @@ void main() {
     colour = computeColour(texPos, colour);
     outColour = colour;
 
+    #ifdef GAP_DEBUG_RENDER
+    // Green=close(<64), Yellow=medium(64-192), Red=far(>192)
+    float t = clamp(fragDist / 192.0, 0.0, 1.0);
+    vec3 dbgCol = mix(vec3(0,1,0), vec3(1,1,0), clamp(t*2.0, 0.0, 1.0));
+    dbgCol = mix(dbgCol, vec3(1,0,0), clamp(t*2.0-1.0, 0.0, 1.0));
+    outColour = vec4(dbgCol, 1.0);
+    #endif
+
     #ifdef DEBUG_RENDER
     uint hash = quadDebug*1231421+123141;
     hash ^= hash>>16;
@@ -208,7 +215,7 @@ void main() {
 
     uint face = getFace();
     face ^= uint((face&1u)!=uint(gl_FrontFacing!=((face>>1)!=0u)));
-    voxy_emitFragment(VoxyFragmentParameters(colour, tile, texPos, face, modelId, getLightmap(), tint, model.customId));
+    voxy_emitFragment(VoxyFragmentParameters(colour, tile, texPos, face, modelId, getLightmapUv(interData.y), tint, model.customId));
 
     #endif
 }
