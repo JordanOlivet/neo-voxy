@@ -146,7 +146,10 @@ public class WorldEngine {
         if (this.dirtyCallback != null) {
             this.dirtyCallback.accept(section, changeState, neighborMsk);
         }
-        if ((!section.inSaveQueue) && (changeState & UPDATE_TYPE_DONT_SAVE) == 0) {
+        // Always re-mark dirty even when already queued: the saving service clears the
+        // flag when it processes the entry, so a change landing while queued must
+        // trigger a re-save instead of being silently dropped
+        if ((changeState & UPDATE_TYPE_DONT_SAVE) == 0) {
             section.markDirty();
         }
     }
