@@ -24,7 +24,7 @@ public class WorldEngine {
     }
 
     public interface ISectionSaveCallback {
-        void save(WorldEngine engine, WorldSection section, boolean nonBlocking);
+        boolean save(WorldEngine engine, WorldSection section, boolean nonBlocking, boolean sectionAlreadyAcquired);
     }
 
     private final TrackedObject thisTracker = TrackedObject.createTrackedObject(this);
@@ -243,14 +243,17 @@ public class WorldEngine {
         return this.refCount.get();
     }
 
-    public void saveSection(WorldSection section) {
-        this.saveSection(section, false);
+    public boolean saveSection(WorldSection section) {
+        return this.saveSection(section, false, false);
     }
 
-    public void saveSection(WorldSection section, boolean nonBlocking) {
-        section.setNotDirty();
+    //Returns true if the section was enqueued for saving (the queue then owns the
+    //acquired ref); dirty clearing is done by the saving service when it processes
+    //the entry
+    public boolean saveSection(WorldSection section, boolean nonBlocking, boolean sectionAlreadyAcquired) {
         if (this.saveCallback != null) {
-            this.saveCallback.save(this, section, nonBlocking);
+            return this.saveCallback.save(this, section, nonBlocking, sectionAlreadyAcquired);
         }
+        return false;
     }
 }
