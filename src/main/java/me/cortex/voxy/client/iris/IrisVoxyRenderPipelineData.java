@@ -7,6 +7,7 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectFunction;
 import kroppeb.stareval.function.FunctionReturn;
 import kroppeb.stareval.function.Type;
 import me.cortex.voxy.client.core.IrisVoxyRenderPipeline;
+import me.cortex.voxy.client.core.rendering.util.LightMapHelper;
 import me.cortex.voxy.client.mixin.iris.CustomUniformsAccessor;
 import me.cortex.voxy.client.mixin.iris.IrisRenderingPipelineAccessor;
 import me.cortex.voxy.common.Logger;
@@ -485,6 +486,13 @@ public class IrisVoxyRenderPipelineData {
         if (samplerNameSet.isEmpty())
             return null;
         Set<TextureWSampler> samplerSet = new LinkedHashSet<>();
+
+        // External samplers whose texture id must be resolved at bind time (the
+        // backing texture can be recreated), bound with sampler 0 to clear any
+        // previously bound sampler object
+        Map<String, IntSupplier> externalTextures = new HashMap<>();
+        externalTextures.put("lightmap", LightMapHelper::getLightmapTextureId);
+
         SamplerHolder samplerBuilder = new SamplerHolder() {
             @Override
             public boolean hasSampler(String s) {
@@ -540,7 +548,13 @@ public class IrisVoxyRenderPipelineData {
             public void addExternalSampler(int texture, String... names) {
                 if (!this.hasSampler(names))
                     return;
-                samplerSet.add(new TextureWSampler(this.name(names), () -> texture, -1));
+                var name = this.name(names);
+                var ex = externalTextures.get(name);
+                if (ex != null) {
+                    samplerSet.add(new TextureWSampler(name, ex, 0)); // unbind any sampler and use the external texture supplier
+                } else {
+                    samplerSet.add(new TextureWSampler(name, () -> texture, -1));
+                }
             }
         };
 

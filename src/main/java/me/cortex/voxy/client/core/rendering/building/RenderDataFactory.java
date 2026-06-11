@@ -379,11 +379,11 @@ public class RenderDataFactory {
     }
 
     private boolean shouldMeshNonOpaqueBlockFace(int face, long quad, long meta, long neighborQuad, long neighborMeta) {
-        // Resolved (2026-04-29): added asymmetric faceCanBeOccluded(self.meta, face) gate.
-        // Prevents over-culling between two same-model partial blocks (stairs/slabs
-        // same-orientation) where the face is at offset >= 0.3 — the face cannot
-        // physically be occluded by anything, so the cull-same shortcut must not fire.
-        if (((quad^neighborQuad)&(0xFFFFL<<26))==0 && ModelQueries.faceCanBeOccluded(meta, face) && (DISABLE_CULL_SAME_OCCLUDES || (ModelQueries.cullsSame(meta)||ModelQueries.faceOccludes(meta, face)))) return false;//This is a hack, if the neigbor and this are the same, dont mesh the face// TODO: FIXME
+        // The cull-same shortcut only fires on cullsSame models: any occlusion by the
+        // neighbor's facing geometry is already tested below via isFaceCoveredByNeighbor,
+        // so a self-face faceOccludes term here is both redundant and wrongly oriented
+        // (it culled on the self face instead of the neighbor's opposite face).
+        if (((quad^neighborQuad)&(0xFFFFL<<26))==0 && (DISABLE_CULL_SAME_OCCLUDES || ModelQueries.cullsSame(meta))) return false;//This is a hack, if the neigbor and this are the same, dont mesh the face// TODO: FIXME
         if (!ModelQueries.faceExists(meta, face)) return false;//Dont mesh if no face
         //if (ModelQueries.faceCanBeOccluded(meta, face)) //TODO: maybe enable this
             int selfId = (int)((quad >> 26) & 0xFFFF);
@@ -1771,9 +1771,11 @@ public class RenderDataFactory {
         aabb |= this.minX;
         aabb |= this.minY<<5;
         aabb |= this.minZ<<10;
-        aabb |= (this.maxX-this.minX-1)<<15;
-        aabb |= (this.maxY-this.minY-1)<<20;
-        aabb |= (this.maxZ-this.minZ-1)<<25;
+        // A degenerate extent (max <= min) would underflow to -1 and smear sign bits
+        // over the higher packed fields
+        aabb |= Math.max(0,this.maxX-this.minX-1)<<15;
+        aabb |= Math.max(0,this.maxY-this.minY-1)<<20;
+        aabb |= Math.max(0,this.maxZ-this.minZ-1)<<25;
 
         return new BuiltSection(section.key, section.getNonEmptyChildren(), aabb, buff, offsets);
     }

@@ -854,7 +854,8 @@ public class ModelFactory {
             throw new IllegalStateException("Biome was put in an id that was not null");
         }
         if (oldBiome == biome) {
-            Logger.error("Biome added was a duplicate");
+            Logger.error("Biome added was a duplicate: " + id);
+            return null;
         }
 
         if (this.modelsRequiringBiomeColours.isEmpty()) {
@@ -929,6 +930,10 @@ public class ModelFactory {
 
             @Override
             public int getBlockTint(BlockPos pos, ColorResolver colorResolver) {
+                if (colorResolver == null) {
+                    Logger.error("Block state: " + state + " colourprovider: " + colorProvider + " had a null colorresolver");
+                    return 0;
+                }
                 return colorResolver.getColor(biome, 0, 0);
             }
 

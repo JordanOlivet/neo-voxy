@@ -81,7 +81,9 @@ public class Mipper {
             // at the high-nibble position; after /8 it is still high-nibble-aligned. The previous
             // `<< 4` over-shifted past the byte and withLight() masked the bits away, silently
             // zeroing the block-light component for air mips.
-            blockLight = blockLight / 8;
+            // The /8 average can leave residue bits in the low nibble (sum not a
+            // multiple of 8), which would corrupt skyLight through the OR below.
+            blockLight = (blockLight / 8) & 0xF0;
             skyLight = (int) Math.ceil((double) skyLight / 8);
 
             return withLight(I111, blockLight | skyLight);
