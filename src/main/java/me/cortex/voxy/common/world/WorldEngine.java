@@ -24,7 +24,7 @@ public class WorldEngine {
     }
 
     public interface ISectionSaveCallback {
-        void save(WorldEngine engine, WorldSection section);
+        void save(WorldEngine engine, WorldSection section, boolean nonBlocking);
     }
 
     private final TrackedObject thisTracker = TrackedObject.createTrackedObject(this);
@@ -244,9 +244,13 @@ public class WorldEngine {
     }
 
     public void saveSection(WorldSection section) {
+        this.saveSection(section, false);
+    }
+
+    public void saveSection(WorldSection section, boolean nonBlocking) {
         section.setNotDirty();
         if (this.saveCallback != null) {
-            this.saveCallback.save(this, section);
+            this.saveCallback.save(this, section, nonBlocking);
         }
     }
 }

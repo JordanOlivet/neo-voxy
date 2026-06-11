@@ -246,7 +246,7 @@ public class ActiveSectionTracker {
                 if (section.tryAcquire()) {
                     if (section.setNotDirty()) {//If the section is dirty we must enqueue for saving
                         if (this.engine != null)
-                            this.engine.saveSection(section);
+                            this.engine.saveSection(section, true);//not allowed to block as we are in a lock
                     }
                     section.release(false);//Special
                 } else {
