@@ -1771,9 +1771,11 @@ public class RenderDataFactory {
         aabb |= this.minX;
         aabb |= this.minY<<5;
         aabb |= this.minZ<<10;
-        aabb |= (this.maxX-this.minX-1)<<15;
-        aabb |= (this.maxY-this.minY-1)<<20;
-        aabb |= (this.maxZ-this.minZ-1)<<25;
+        // A degenerate extent (max <= min) would underflow to -1 and smear sign bits
+        // over the higher packed fields
+        aabb |= Math.max(0,this.maxX-this.minX-1)<<15;
+        aabb |= Math.max(0,this.maxY-this.minY-1)<<20;
+        aabb |= Math.max(0,this.maxZ-this.minZ-1)<<25;
 
         return new BuiltSection(section.key, section.getNonEmptyChildren(), aabb, buff, offsets);
     }
