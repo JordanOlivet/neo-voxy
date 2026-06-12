@@ -1058,7 +1058,9 @@ public class ModelFactory {
         if (isEmissive) {
             return 15;//full bright
         }
-        return state.getLightEmission();
+        // Clamp: modded blocks can report emission outside 0-15 which would overflow
+        // the 4-bit metadata field
+        return Math.clamp(state.getLightEmission(), 0, 15);
     }
 
     private static float[] computeModelDepth(ColourDepthTextureData[] textures, int checkMode) {
