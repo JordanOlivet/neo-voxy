@@ -227,27 +227,11 @@ public class ModelFactory {
         if (this.idMappings[blockId] != -1) {
             return false;
         }
-        // We are (probably) going to be baking the block id
-        // check that it is currently not inflight, if it is, return as its already
-        // being baked
-        // else add it to the flight as it is going to be baked
-        this.blockStatesInFlightLock.lock();
-        if (!this.blockStatesInFlight.add(blockId)) {
-            this.blockStatesInFlightLock.unlock();
-            // Block baking is already in-flight
-            return false;
-        }
-        this.blockStatesInFlightLock.unlock();
-
-        VarHandle.loadLoadFence();
-
-        // We need to get it twice cause of threading
-        if (this.idMappings[blockId] != -1) {
-            return false;
-        }
 
         var blockState = this.mapper.getBlockStateFromBlockId(blockId);
 
+        // We do the fluid dependency first so that it is always guaranteed that fluid
+        // models are ordered before the block models.
         // Before we enqueue the baking of this blockstate, we must check if it has a
         // fluid state associated with it
         // if it does, we must ensure that it is (effectivly) baked BEFORE we bake this
@@ -268,14 +252,39 @@ public class ModelFactory {
             }
         }
 
-        RawBakeResult result = new RawBakeResult(blockId, blockState);
-        int allocation = this.downstream.download(MODEL_TEXTURE_SIZE * MODEL_TEXTURE_SIZE * 2 * 4 * 6,
-                ptr -> {
-                    this.rawBakeResults.add(result.cpyBuf(ptr));
-                    this.signalWork();
-                });
-        this.bakery.renderToStream(blockState, this.downstream.getBufferId(), allocation);
-        return true;
+        // We are (probably) going to be baking the block id
+        // check that it is currently not inflight, if it is, return as its already
+        // being baked
+        // else add it to the flight as it is going to be baked
+        this.blockStatesInFlightLock.lock();
+        try {
+            if (!this.blockStatesInFlight.add(blockId)) {
+                // Block baking is already in-flight
+                return false;
+            }
+
+            VarHandle.loadLoadFence();
+
+            // The enqueue must happen inside the lock: the order in which blocks are
+            // added to blockStatesInFlight must be the order they are enqueued for
+            // baking, otherwise a concurrent addEntry can interleave them
+
+            // We need to get it twice cause of threading
+            if (this.idMappings[blockId] != -1) {
+                return false;
+            }
+
+            RawBakeResult result = new RawBakeResult(blockId, blockState);
+            int allocation = this.downstream.download(MODEL_TEXTURE_SIZE * MODEL_TEXTURE_SIZE * 2 * 4 * 6,
+                    ptr -> {
+                        this.rawBakeResults.add(result.cpyBuf(ptr));
+                        this.signalWork();
+                    });
+            this.bakery.renderToStream(blockState, this.downstream.getBufferId(), allocation);
+            return true;
+        } finally {
+            this.blockStatesInFlightLock.unlock();
+        }
     }
 
     private boolean processModelResult() {

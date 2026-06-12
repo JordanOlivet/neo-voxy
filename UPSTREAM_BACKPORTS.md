@@ -22,18 +22,20 @@ Statuts : ✅ porté · 🟰 déjà couvert par un fix local équivalent · ⏭ 
 | `a5c7f564` + `91d4f7c8` | fix neighbor check cull-same | ✅ | Raccourci réduit à `cullsSame(meta)` ; remplace notre garde `faceCanBeOccluded` |
 | `5d407397` | AABB `Math.max` (bug 1+ an) | ✅ | Clamp des extents dégénérés dans le packing AABB |
 
-## Lot 2 — Stabilité / concurrence (à venir, branche `backport-stability`)
+## Lot 2 — Stabilité / concurrence (PR `backport-stability`)
 
 | SHA | Quoi | Statut | Notes |
 |-----|------|--------|-------|
-| `352da265` + `ebea10c8` | **CRITICAL** fuite mémoire RocksDB + double close | ⏳ | `f9e3f279` revert le bump de version RocksDB mais garde le fix code. Comparer avec notre `6d5fa8ed` |
-| `192721a7` | race condition rare à l'unload | ⏳ | ActiveSectionTracker, WorldEngine, WorldSection, SectionSavingService |
-| `136381a7` | fix deadlock | ⏳ | Partie code seulement, skip bump Sodium |
-| `3205a336` + `c7166d3f` | atomics dirty/unmarkDirty | ⏳ | Correction sauvegarde |
-| `d2f87345` | unlock on error | ⏳ | |
-| `5f216fa1` + `c2ba3c22` | race condition possible | ⏳ | |
-| `6189ee38` | fix ingestion chunks au respawn/téléport | ⏳ | Mixins MC + Sodium, adapter NeoForge |
-| `36964ee4` + `2a979ac0` + `c6b30e51` | lock file exclusif (off par défaut) | ⏳ | Optionnel, évaluer |
+| `352da265` + `ebea10c8` | **CRITICAL** fuite mémoire RocksDB + double close | ✅ | Iterator id-mappings fermé, handles fermés après options, `db.closeE()` en dernier. Version native 8.10.0 conservée (le fix upstream est purement code, leur bump 10.9.1 a été reverté) |
+| `136381a7` | fix deadlock save-queue à l'unload | ✅ | Chaîne `nonBlocking` saveSection→enqueueSave, sleep→yield, throw BAD POS retiré (NodeManager) |
+| `192721a7` | race condition rare à l'unload | ✅ | `shouldSave()`, saveSection renvoie l'enqueue, retry sous lock si refs/dirty regagnés, assert freed-while-dirty |
+| `3205a336` | toujours markDirty même si en save queue | ✅ | Sinon changement perdu ; le clear est fait par le saving service |
+| `c7166d3f` | checks + unmarkDirty dans saving service | 🟰 | Entièrement couvert par le port de `192721a7` |
+| `d2f87345` | unlock on error (VoxyInstance.getOrCreate) | ✅ | Même fuite de write lock chez nous |
+| `5f216fa1` | enqueue bake atomique avec in-flight | ✅ | Deps fluides avant le gate, enqueue sous le lock |
+| `c2ba3c22` | while-loop processAllThings | 🟰 | Notre boucle wait/notify (timeout 100 ms) couvre le cas |
+| `6189ee38` | fix ingestion chunks au respawn/téléport | ✅ | Vérif position dans cheekyGetChunk + getChunk(FULL, false) dans les 2 chemins d'ingest |
+| `36964ee4` + `2a979ac0` + `c6b30e51` | lock file exclusif | 🚫 | Différé : désactivé par défaut upstream même aujourd'hui, faible valeur pour notre usage |
 
 ## Lot 3 — Qualité rendu / features (à venir, branche `backport-render-quality`)
 

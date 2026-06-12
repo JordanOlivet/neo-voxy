@@ -28,7 +28,17 @@ public class MixinClientChunkCache implements ICheekyClientChunkCache {
     @Override
     public LevelChunk voxy$cheekyGetChunk(int x, int z) {
         // This doesnt do the in range check stuff, it just gets the chunk at all costs
-        return this.storage.getChunk(this.storage.getIndex(x, z));
+        var chunk = this.storage.getChunk(this.storage.getIndex(x, z));
+        if (chunk == null) {
+            return null;
+        }
+        // Verify the chunk is at the requested position: the storage ring buffer can
+        // hold a different chunk at the same index (e.g. after a death/respawn far
+        // away), which used to get ingested at the wrong place
+        if (chunk.getPos().x == x && chunk.getPos().z == z) {
+            return chunk;
+        }
+        return null;
     }
 
     @Inject(method = "drop", at = @At("HEAD"))

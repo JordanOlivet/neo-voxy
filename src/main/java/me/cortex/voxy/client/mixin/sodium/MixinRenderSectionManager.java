@@ -136,17 +136,22 @@ public class MixinRenderSectionManager {
                 this.cachedChunkStatus = tracker.getOrDefault(key, 0);
             }
             if (this.cachedChunkStatus == 3) {// If this chunk still has surrounding chunks
-                var section = this.level.getChunk(x, z).getSection(y - this.bottomSectionY);
-                var lp = this.level.getLightEngine();
+                // Only ingest if the chunk exists at FULL status; during respawn or
+                // teleport transitions the blind getChunk could hand back wrong data
+                var chunk = this.level.getChunkSource().getChunk(x, z, ChunkStatus.FULL, false);
+                if (chunk != null) {
+                    var section = chunk.getSection(y - this.bottomSectionY);
+                    var lp = this.level.getLightEngine();
 
-                var csp = SectionPos.of(x, y, z);
-                var blp = lp.getLayerListener(LightLayer.BLOCK).getDataLayerData(csp);
-                var slp = lp.getLayerListener(LightLayer.SKY).getDataLayerData(csp);
+                    var csp = SectionPos.of(x, y, z);
+                    var blp = lp.getLayerListener(LightLayer.BLOCK).getDataLayerData(csp);
+                    var slp = lp.getLayerListener(LightLayer.SKY).getDataLayerData(csp);
 
-                // Note: we dont do this check and just blindly ingest, it shouldbe ok :tm:
-                // if (blp != null || slp != null)
-                VoxelIngestService.rawIngest(system.getEngine(), section, x, y, z, blp == null ? null : blp.copy(),
-                        slp == null ? null : slp.copy());
+                    // Note: we dont do this check and just blindly ingest, it shouldbe ok :tm:
+                    // if (blp != null || slp != null)
+                    VoxelIngestService.rawIngest(system.getEngine(), section, x, y, z, blp == null ? null : blp.copy(),
+                            slp == null ? null : slp.copy());
+                }
             }
         }
 

@@ -24,7 +24,7 @@ public class WorldEngine {
     }
 
     public interface ISectionSaveCallback {
-        void save(WorldEngine engine, WorldSection section);
+        boolean save(WorldEngine engine, WorldSection section, boolean nonBlocking, boolean sectionAlreadyAcquired);
     }
 
     private final TrackedObject thisTracker = TrackedObject.createTrackedObject(this);
@@ -146,7 +146,10 @@ public class WorldEngine {
         if (this.dirtyCallback != null) {
             this.dirtyCallback.accept(section, changeState, neighborMsk);
         }
-        if ((!section.inSaveQueue) && (changeState & UPDATE_TYPE_DONT_SAVE) == 0) {
+        // Always re-mark dirty even when already queued: the saving service clears the
+        // flag when it processes the entry, so a change landing while queued must
+        // trigger a re-save instead of being silently dropped
+        if ((changeState & UPDATE_TYPE_DONT_SAVE) == 0) {
             section.markDirty();
         }
     }
@@ -243,10 +246,17 @@ public class WorldEngine {
         return this.refCount.get();
     }
 
-    public void saveSection(WorldSection section) {
-        section.setNotDirty();
+    public boolean saveSection(WorldSection section) {
+        return this.saveSection(section, false, false);
+    }
+
+    //Returns true if the section was enqueued for saving (the queue then owns the
+    //acquired ref); dirty clearing is done by the saving service when it processes
+    //the entry
+    public boolean saveSection(WorldSection section, boolean nonBlocking, boolean sectionAlreadyAcquired) {
         if (this.saveCallback != null) {
-            this.saveCallback.save(this, section);
+            return this.saveCallback.save(this, section, nonBlocking, sectionAlreadyAcquired);
         }
+        return false;
     }
 }

@@ -105,8 +105,9 @@ public class RocksDBStorageBackend extends StorageBackend {
             this.sectionReadOps = new ReadOptions();
             this.sectionWriteOps = new WriteOptions();
 
-            this.closeList.addAll(handles);
-            this.closeList.add(this.db);
+            // The db itself is NOT in the closeList: it must be closed last, via
+            // closeE(), after every dependent native handle is released. Having it
+            // closed mid-list leaked native memory on every world unload.
             this.closeList.add(options);
             this.closeList.add(cfDefaultOpts);
             this.closeList.add(cfIdMappingsOpts);
@@ -115,6 +116,7 @@ public class RocksDBStorageBackend extends StorageBackend {
             this.closeList.add(this.sectionWriteOps);
             this.closeList.add(filter);
             this.closeList.add(bCache);
+            this.closeList.addAll(handles);
 
             this.worldSections = handles.get(1);
             this.idMappings = handles.get(2);
@@ -202,10 +204,11 @@ public class RocksDBStorageBackend extends StorageBackend {
 
     @Override
     public Int2ObjectOpenHashMap<byte[]> getIdMappingsData() {
-        var iterator = this.db.newIterator(this.idMappings);
         var out = new Int2ObjectOpenHashMap<byte[]>();
-        for (iterator.seekToFirst(); iterator.isValid(); iterator.next()) {
-            out.put(bytesToInt(iterator.key()), iterator.value());
+        try (var iterator = this.db.newIterator(this.idMappings)) {
+            for (iterator.seekToFirst(); iterator.isValid(); iterator.next()) {
+                out.put(bytesToInt(iterator.key()), iterator.value());
+            }
         }
         return out;
     }
@@ -223,6 +226,11 @@ public class RocksDBStorageBackend extends StorageBackend {
     public void close() {
         this.flush();
         this.closeList.forEach(AbstractImmutableNativeReference::close);
+        try {
+            this.db.closeE();
+        } catch (RocksDBException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private static byte[] intToBytes(int i) {
