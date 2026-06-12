@@ -37,18 +37,20 @@ Statuts : ✅ porté · 🟰 déjà couvert par un fix local équivalent · ⏭ 
 | `6189ee38` | fix ingestion chunks au respawn/téléport | ✅ | Vérif position dans cheekyGetChunk + getChunk(FULL, false) dans les 2 chemins d'ingest |
 | `36964ee4` + `2a979ac0` + `c6b30e51` | lock file exclusif | 🚫 | Différé : désactivé par défaut upstream même aujourd'hui, faible valeur pour notre usage |
 
-## Lot 3 — Qualité rendu / features (à venir, branche `backport-render-quality`)
+## Lot 3 — Qualité rendu / features (PR `backport-render-quality`)
 
 | SHA | Quoi | Statut | Notes |
 |-----|------|--------|-------|
-| `0781dd47` | traversal = cercle lisse RD, plus de pop-in | ⏳ | + shader `traversal_dev.comp` |
-| `a19d5d0f` | pas d'auto-enqueue render en bord de RD | ⏳ | |
-| `9694968d` | fix fade-in des chunks | ⏳ | |
-| `b33ad015` + `ff3a84cf` + `62099a74` | support émissif | ⏳ | |
-| `260bcdbc` | détection dynamique layer modèle | ⏳ | |
-| `26949ee1` + `7d785cda` | meilleure gestion stairs | ⏳ | |
-| `ad5f6ee0` | fix warning driver AMD | ⏳ | |
-| `7446e9ec` + `0033da2a` | RD par incréments + valeur config vs effective | ⏳ | |
+| `0781dd47` | traversal = cercle lisse RD, plus de pop-in | ✅ | Uniform `renderDistance` + cull XZ circulaire dans `traversal_dev.comp`, tracker +1 |
+| `a19d5d0f` | pas d'auto-enqueue render en bord de RD | ✅ | `furthestPointToCamera` + gate sur enqueueSelfForRender |
+| `9694968d` | fix fade-in des chunks | ✅ | Strip des markers `_cfi_ignoreMarker` du patch json Iris |
+| `b33ad015` + `62099a74` | support émissif | 🟰 | Déjà implémenté chez nous (`9f2c4853` « Fix light not emit from LODs ») |
+| `ff3a84cf` | clamp émission 0-15 | ✅ | Mods peuvent déclarer hors plage → overflow du champ 4 bits |
+| `260bcdbc` | détection dynamique layer modèle | ✅ | Adapté à notre flux RenderType ; translucent sans pixel translucide → solid/cutout |
+| `26949ee1` + `7d785cda` | stairs bakées comme bloc de base | ✅ | `withPropertiesOf` + accesswidener `StairBlock.baseState` |
+| `ad5f6ee0` | fix warning driver AMD | ✅ | Skip `glDispatchCompute(0)` |
+| `7446e9ec` | RD float à incréments fins | 🚫 | Notre UI config réécrite a sa propre granularité ; ripple config/réseau pour gain UX mineur |
+| `0033da2a` | valeur config vs effective | ⏭ | Le check warning visé n'existe pas chez nous |
 
 ## Lot 4 — Performance (différé, au cas par cas, réimplémentation si port impossible)
 
