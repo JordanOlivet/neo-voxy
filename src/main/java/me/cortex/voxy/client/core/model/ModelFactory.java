@@ -525,6 +525,26 @@ public class ModelFactory {
             }
         }
 
+        // Refine the declared layer from the actually baked texture data: blocks
+        // declared translucent whose textures contain no translucent pixel get
+        // downgraded to solid/cutout, which fixes sorting artifacts and lets more
+        // geometry take the cheaper opaque path
+        if (blockRenderLayer == RenderType.translucent() && !(blockState.getBlock() instanceof LiquidBlock)) {
+            boolean anyTranslucent = false;
+            for (var face : textureData) {
+                anyTranslucent |= TextureUtils.hasTranslucentPixel(face);
+                if (anyTranslucent) break;
+            }
+            if (!anyTranslucent) {
+                boolean solid = true;
+                for (var face : textureData) {
+                    solid &= TextureUtils.isSolidWhereDrawn(face);
+                    if (!solid) break;
+                }
+                blockRenderLayer = solid ? RenderType.solid() : RenderType.cutout();
+            }
+        }
+
         int checkMode = blockRenderLayer == RenderType.solid() ? TextureUtils.WRITE_CHECK_STENCIL
                 : TextureUtils.WRITE_CHECK_ALPHA;
 
