@@ -35,6 +35,7 @@ import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.LeavesBlock;
 import net.minecraft.world.level.block.LiquidBlock;
+import net.minecraft.world.level.block.StairBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.lighting.LevelLightEngine;
@@ -229,6 +230,12 @@ public class ModelFactory {
         }
 
         var blockState = this.mapper.getBlockStateFromBlockId(blockId);
+
+        // Bake stairs as their base full block (carrying shared properties like
+        // waterlogged): the partial stair shape meshes poorly at LOD scale
+        if (blockState.getBlock() instanceof StairBlock sb) {
+            blockState = sb.baseState.getBlock().withPropertiesOf(blockState);
+        }
 
         // We do the fluid dependency first so that it is always guaranteed that fluid
         // models are ordered before the block models.
