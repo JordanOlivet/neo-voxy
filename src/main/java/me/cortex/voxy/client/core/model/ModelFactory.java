@@ -35,6 +35,7 @@ import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.LeavesBlock;
 import net.minecraft.world.level.block.LiquidBlock;
+import net.minecraft.world.level.block.StairBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.lighting.LevelLightEngine;
@@ -229,6 +230,12 @@ public class ModelFactory {
         }
 
         var blockState = this.mapper.getBlockStateFromBlockId(blockId);
+
+        // Bake stairs as their base full block (carrying shared properties like
+        // waterlogged): the partial stair shape meshes poorly at LOD scale
+        if (blockState.getBlock() instanceof StairBlock sb) {
+            blockState = sb.baseState.getBlock().withPropertiesOf(blockState);
+        }
 
         // We do the fluid dependency first so that it is always guaranteed that fluid
         // models are ordered before the block models.
@@ -515,6 +522,26 @@ public class ModelFactory {
                 blockRenderLayer = RenderType.solid();
             } else {
                 blockRenderLayer = ItemBlockRenderTypes.getChunkRenderType(blockState);
+            }
+        }
+
+        // Refine the declared layer from the actually baked texture data: blocks
+        // declared translucent whose textures contain no translucent pixel get
+        // downgraded to solid/cutout, which fixes sorting artifacts and lets more
+        // geometry take the cheaper opaque path
+        if (blockRenderLayer == RenderType.translucent() && !(blockState.getBlock() instanceof LiquidBlock)) {
+            boolean anyTranslucent = false;
+            for (var face : textureData) {
+                anyTranslucent |= TextureUtils.hasTranslucentPixel(face);
+                if (anyTranslucent) break;
+            }
+            if (!anyTranslucent) {
+                boolean solid = true;
+                for (var face : textureData) {
+                    solid &= TextureUtils.isSolidWhereDrawn(face);
+                    if (!solid) break;
+                }
+                blockRenderLayer = solid ? RenderType.solid() : RenderType.cutout();
             }
         }
 
@@ -1058,7 +1085,9 @@ public class ModelFactory {
         if (isEmissive) {
             return 15;//full bright
         }
-        return state.getLightEmission();
+        // Clamp: modded blocks can report emission outside 0-15 which would overflow
+        // the 4-bit metadata field
+        return Math.clamp(state.getLightEmission(), 0, 15);
     }
 
     private static float[] computeModelDepth(ColourDepthTextureData[] textures, int checkMode) {

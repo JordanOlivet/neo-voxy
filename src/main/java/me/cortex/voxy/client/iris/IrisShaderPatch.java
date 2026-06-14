@@ -373,6 +373,11 @@ public class IrisShaderPatch {
                 }
                 voxyPatchData = builder.toString();
             }
+
+            //Strip the chunk-fade-in ignore markers some packs inject; leaving them in
+            //breaks the patched shaders and makes LOD chunks fade in
+            voxyPatchData = voxyPatchData.replaceAll("void _cfi_ignoreMarker\\(\\) \\{\\}", "");
+
             patchData = GSON.fromJson(voxyPatchData, PatchGson.class);
             if (patchData == null) {
                 throw new IllegalStateException(

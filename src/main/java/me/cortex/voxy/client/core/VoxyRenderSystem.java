@@ -153,7 +153,7 @@ public class VoxyRenderSystem {
                         this.nodeManager::addTopLevel,
                         this.nodeManager::removeTopLevel);
 
-                this.renderDistanceTracker.setRenderDistance(VoxyConfig.CONFIG.sectionRenderDistance);
+                this.setRenderDistance(VoxyConfig.CONFIG.sectionRenderDistance);
             }
 
             this.chunkBoundRenderer = new ChunkBoundRenderer(this.pipeline);
@@ -444,7 +444,7 @@ public class VoxyRenderSystem {
     }
 
     public void setRenderDistance(int renderDistance) {
-        this.renderDistanceTracker.setRenderDistance(renderDistance);
+        this.renderDistanceTracker.setRenderDistance(renderDistance+1);//the +1 is to cover the outer ring of chunks when rendering a circle
     }
 
     public Viewport<?> getViewport() {
