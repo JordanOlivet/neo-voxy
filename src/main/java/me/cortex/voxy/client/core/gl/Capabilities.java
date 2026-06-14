@@ -6,7 +6,9 @@ import org.lwjgl.opengl.GL20C;
 
 import static org.lwjgl.opengl.GL11.*;
 import static org.lwjgl.opengl.GL32.glGetInteger64;
+import static org.lwjgl.opengl.GL11.glGetInteger;
 import static org.lwjgl.opengl.GL43C.GL_MAX_SHADER_STORAGE_BLOCK_SIZE;
+import static org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT;
 import static org.lwjgl.opengl.NVXGPUMemoryInfo.*;
 
 public class Capabilities {
@@ -17,6 +19,7 @@ public class Capabilities {
     public final boolean meshShaders;
     public final boolean INT64_t;
     public final long ssboMaxSize;
+    public final int ssboBindingAlignment;
     public final boolean isMesa;
     public final boolean canQueryGpuMemory;
     public final long totalDedicatedMemory;//Bytes, dedicated memory
@@ -63,6 +66,7 @@ public class Capabilities {
         }
 
         this.ssboMaxSize = glGetInteger64(GL_MAX_SHADER_STORAGE_BLOCK_SIZE);
+        this.ssboBindingAlignment = glGetInteger(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT);
 
         this.isMesa = glGetString(GL_VERSION).toLowerCase().contains("mesa");
         String vendor = glGetString(GL_VENDOR).toLowerCase();
