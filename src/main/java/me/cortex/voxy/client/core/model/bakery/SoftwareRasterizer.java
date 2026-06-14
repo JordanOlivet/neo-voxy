@@ -151,7 +151,13 @@ public class SoftwareRasterizer {
                 float w1 = edge(v2, v3, cx, cy)*invArea;
                 float w2 = edge(v3, v1, cx, cy)*invArea;
                 float w3 = 1.0f-w1-w2;
-                if ((w1>0.0f&&w2>0.0f&&w3>0.0f)||(orZero&&w1>=0.0f&&w2>=0.0f&&w3>=0.0f)) {
+                // The second triangle of each quad fills the shared diagonal. Use a
+                // small epsilon: at MODEL_TEXTURE_SIZE=8 the diagonal pixels land
+                // exactly on the shared edge and float error pushed the barycentric
+                // slightly negative, leaving a 1px diagonal of unwritten (transparent)
+                // pixels through every face — very visible at 8px (see-through blocks).
+                final float EDGE_EPS = 1.0e-4f;
+                if ((w1>0.0f&&w2>0.0f&&w3>0.0f)||(orZero&&w1>=-EDGE_EPS&&w2>=-EDGE_EPS&&w3>=-EDGE_EPS)) {
                     //Dont need to worry about perspective correction afak as it should already be all correct
 
                     //pixel is inside the triangle
