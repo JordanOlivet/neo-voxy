@@ -25,7 +25,7 @@ public abstract class VoxyConfigScreenPages {
 
     public static OptionPage page() {
         List<OptionGroup> groups = new ArrayList<>();
-        VoxyConfig storage = VoxyConfig.CONFIG;
+        VoxyOptionStorage storage = VoxyOptionStorage.INSTANCE;
 
         // General
         groups.add(OptionGroup.createBuilder()

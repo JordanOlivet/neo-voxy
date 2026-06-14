@@ -7,7 +7,6 @@ import me.cortex.voxy.client.core.SSAO;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.cpu.CpuLayout;
 import me.cortex.voxy.commonImpl.VoxyCommon;
-import net.caffeinemc.mods.sodium.client.gui.options.storage.OptionStorage;
 import me.cortex.voxy.common.util.ModLoaderUtil;
 
 import java.io.FileReader;
@@ -16,7 +15,14 @@ import java.lang.reflect.Modifier;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-public class VoxyConfig implements OptionStorage<VoxyConfig> {
+// NOTE: deliberately does NOT implement Sodium's OptionStorage. VoxyConfig is
+// loaded very early (e.g. from the Iris StandardMacros mixin during shaderpack
+// load); hard-implementing a Sodium client GUI interface here made class linking
+// require that GUI class, which under some modpack classloader setups is not
+// resolvable yet and crashed startup with NoClassDefFoundError. The OptionStorage
+// adapter lives in VoxyOptionStorage, loaded lazily only when the Sodium options
+// GUI is opened.
+public class VoxyConfig {
     private static final Gson GSON = new GsonBuilder()
             .setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES)
             .setPrettyPrinting()
@@ -110,11 +116,6 @@ public class VoxyConfig implements OptionStorage<VoxyConfig> {
     private static Path getConfigPath() {
         return ModLoaderUtil.getConfigDir()
                 .resolve("voxy-config.json");
-    }
-
-    @Override
-    public VoxyConfig getData() {
-        return this;
     }
 
     public boolean isRenderingEnabled() {
