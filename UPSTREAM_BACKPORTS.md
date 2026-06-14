@@ -52,19 +52,19 @@ Statuts : ✅ porté · 🟰 déjà couvert par un fix local équivalent · ⏭ 
 | `7446e9ec` | RD float à incréments fins | 🚫 | Notre UI config réécrite a sa propre granularité ; ripple config/réseau pour gain UX mineur |
 | `0033da2a` | valeur config vs effective | ⏭ | Le check warning visé n'existe pas chez nous |
 
-## Lot 4 — Performance (différé, au cas par cas, réimplémentation si port impossible)
+## Lot 4 — Performance (PR `backport-perf` pour le batch porté ; reste différé)
 
-| # | SHAs | Quoi | Statut |
-|---|------|------|--------|
-| 1 | `1511bf36` + `5dcaa23b` + `7d511421` | pipeline sérialisation sans memcopy/realloc | ⏳ |
-| 2 | `80d217d8` + `23b095b0` + `6a691211` | ExpandingObjectAllocationList borné + request ids 19 bits | ⏳ |
-| 3 | `0ba739f9` | pas de meshing pendant baking intensif | ⏳ |
-| 4 | `1f993f8e` | opto mesh factory | ⏳ |
-| 5 | `e5af2c91` + `eaf107e4` | alignement upload stream (capacités OpenGL) | ⏳ |
-| 6 | `4333864c` | centralisation unpacks de position | ⏳ |
-| 7 | `d7782df2` + `40a62448` + `a5afb2fb` + `672ee7c7` | réutilisation geometry buffer + texture atlas | ⏳ |
-| 8 | `5ca0fa73` + `e62beff1` + `0637d1ad` + `fd81fd18` | bakery software raster + baking off-thread + meshing sans limite (**le plus gros**) | ⏳ |
-| 9 | `60858794` + `a5bb6a73` | fix gros texture packs / atlas (dépend possiblement de 8) | ⏳ |
+| # | SHAs | Quoi | Statut | Notes |
+|---|------|------|--------|-------|
+| 1 | `1511bf36` + `5dcaa23b` + `7d511421` | pipeline sérialisation sans memcopy/realloc | ✅(part)/🚫(part) | `1511bf36` (réutilise le thread-local en ingest) porté. Le no-copy serialize/compress (`7d511421`, `5dcaa23b`) **non porté** : notre modèle mémoire a divergé (on garde copy/free, compressors différents), le no-free repose sur des buffers thread-local réutilisés → risque use-after-free / corruption DB pour gain modéré sur un chemin déjà fonctionnel et non signalé comme lent |
+| 2 | `80d217d8` + `23b095b0` + `6a691211` | ExpandingObjectAllocationList borné + request ids 19 bits | ✅ | request id field 16→19 bits, throw clair si saturation (CPU-side, pas de changement shader) |
+| 3 | `0ba739f9` | pas de meshing pendant baking intensif | ✅ | pause mesh gen si bake queue > 1000 |
+| 4 | `1f993f8e` | opto mesh factory | ✅ | shortcut air pour modelId==0 |
+| 5 | `e5af2c91` + `eaf107e4` | alignement upload stream (capacités OpenGL) | ✅ | **fix de correction** : offsets `glBindBufferRange` alignés sur `GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT` du driver (pas hardcodé 16). Le min 512mb de `eaf107e4` non porté (logique geometry capacity divergente) |
+| 6 | `4333864c` | centralisation unpacks de position (4 shaders) | 🚫 | refacto sans changement fonctionnel ; valeur = « faciliter les ports futurs » (surtout bakery item 8, non porté) ; risque de régression GPU pour gain nul isolément |
+| 7 | `d7782df2` + `a5afb2fb` + `672ee7c7` | réutilisation geometry buffer + texture atlas | ✅ | `RenderResourceReuse` : cache du geometry buffer multi-Go + atlas modèle entre recréations du render system (reload, dimension, toggle). `40a62448` (generateMask) **non porté** : util sans appelant |
+| 8 | `5ca0fa73` + `e62beff1` + `0637d1ad` + `fd81fd18` | bakery software raster + baking off-thread + meshing sans limite (**le plus gros**) | ⏳ | **différé, session dédiée** : 592 lignes, nouveau rasterizer CPU remplaçant notre bakery GL `bakery2` qui a divergé et fonctionne. Risque élevé pour un système qui marche, gain (vitesse de baking) non signalé. `0637d1ad`/`fd81fd18` (retirer les limites de baking/meshing) dépendent de ce rewrite et **contrediraient** l'item 3 sans lui |
+| 9 | `60858794` + `a5bb6a73` | fix gros texture packs / atlas | ⏳ | dépend de l'item 8 (bakery) |
 
 ## Skippés (décision, pas de port)
 

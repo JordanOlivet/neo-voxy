@@ -14,14 +14,38 @@ public class BasicSectionGeometryData implements IGeometryData {
     public static final int SECTION_METADATA_SIZE = 32;
     private final GlBuffer sectionMetadataBuffer;
     private final GlBuffer geometryBuffer;
+    public final boolean isExternalGeometryBuffer;
 
     private final int maxSectionCount;
     private int currentSectionCount;
 
-    public BasicSectionGeometryData(int maxSectionCount, long geometryCapacity) {
+    // Adopt an externally owned/managed geometry buffer (e.g. reused via
+    // RenderResourceReuse) instead of allocating one. The buffer is not freed here.
+    public BasicSectionGeometryData(int maxSectionCount, GlBuffer geometryBuffer) {
         this.maxSectionCount = maxSectionCount;
         this.sectionMetadataBuffer = new GlBuffer((long) maxSectionCount * SECTION_METADATA_SIZE);
         // 8 Cause a quad is 8 bytes
+        if ((geometryBuffer.size() % 8) != 0) {
+            throw new IllegalStateException();
+        }
+        this.geometryBuffer = geometryBuffer;
+        this.isExternalGeometryBuffer = true;
+    }
+
+    public BasicSectionGeometryData(int maxSectionCount, long geometryCapacity) {
+        this.isExternalGeometryBuffer = false;
+        this.maxSectionCount = maxSectionCount;
+        this.sectionMetadataBuffer = new GlBuffer((long) maxSectionCount * SECTION_METADATA_SIZE);
+        // 8 Cause a quad is 8 bytes
+        if ((geometryCapacity % 8) != 0) {
+            throw new IllegalStateException();
+        }
+        this.geometryBuffer = allocateGeometryBuffer(geometryCapacity);
+    }
+
+    // Allocates the geometry buffer with the sparse-buffer fallback path. Shared by
+    // the self-allocating constructor and RenderResourceReuse.
+    public static GlBuffer allocateGeometryBuffer(long geometryCapacity) {
         if ((geometryCapacity % 8) != 0) {
             throw new IllegalStateException();
         }
@@ -63,9 +87,9 @@ public class BasicSectionGeometryData implements IGeometryData {
                 throw new IllegalStateException("Unable to allocate geometry buffer, got gl error " + error);
             }
         }
-        this.geometryBuffer = buffer;
         long delta = System.currentTimeMillis() - start;
         Logger.info("Successfully allocated the geometry buffer in " + delta + "ms");
+        return buffer;
     }
 
     private long sparseCommitment = 0;// Tracks the current range of the allocated sparse buffer
@@ -110,8 +134,18 @@ public class BasicSectionGeometryData implements IGeometryData {
     }
 
     @Override
+    public long getMaxCapacity() {
+        return this.geometryBuffer.size();
+    }
+
+    @Override
     public void free() {
         this.sectionMetadataBuffer.free();
+
+        // External buffer is owned by RenderResourceReuse: leave it allocated for reuse
+        if (this.isExternalGeometryBuffer) {
+            return;
+        }
 
         long gpuMemory = 0;
         if (Capabilities.INSTANCE.canQueryGpuMemory) {
