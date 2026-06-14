@@ -73,12 +73,25 @@ public class SoftwareModelTextureBakery {
         glFinish();
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-        glPixelStorei(GL_PACK_ROW_LENGTH, width);
+        // Read the full atlas tightly packed. Pixel-store PACK state is GLOBAL: any
+        // non-default value left here corrupts later glReadPixels/glGetTexImage calls
+        // by other code (e.g. the watut mod reads the framebuffer on screen render,
+        // and a leftover PACK_ROW_LENGTH made it write out of bounds -> NVIDIA driver
+        // crash). ROW_LENGTH=0 means "use the image width", which is what we want, so
+        // we never set it; ALIGNMENT=4 matches RGBA8. We restore everything to GL
+        // defaults afterwards so this method is hermetic.
+        glPixelStorei(GL_PACK_ROW_LENGTH, 0);
         glPixelStorei(GL_PACK_IMAGE_HEIGHT, 0);
         glPixelStorei(GL_PACK_SKIP_ROWS, 0);
         glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
         glPixelStorei(GL_PACK_ALIGNMENT, 4);
         glGetTextureImage(glId, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture);
+        // Restore pixel-store PACK state to GL defaults
+        glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_PACK_IMAGE_HEIGHT, 0);
+        glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+        glPixelStorei(GL_PACK_ALIGNMENT, 4);
         this.rasterizer.setSamplerTexture(texture, width, height);
         this.textureLoaded = true;
     }
