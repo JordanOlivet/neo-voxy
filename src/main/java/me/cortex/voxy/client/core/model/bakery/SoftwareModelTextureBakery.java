@@ -8,6 +8,7 @@ import net.minecraft.client.renderer.ItemBlockRenderTypes;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.BlockAndTintGetter;
 import net.minecraft.world.level.ColorResolver;
@@ -67,32 +68,45 @@ public class SoftwareModelTextureBakery {
         int width = glGetTexLevelWidth(glId);
         int height = glGetTexLevelHeight(glId);
 
-        var texture = new int[width * height];
+        // Read the atlas mip pyramid so the rasterizer can pick the mip matching the
+        // output footprint (the GL bake relied on the GPU's mipmapped texture() to
+        // average sprites down to the 8px faces). Mip count = the atlas's mip levels.
+        int mipLevels = ((TextureAtlas) tex).mipLevel + 1;
 
         glFlush();
         glFinish();
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-        // Read the full atlas tightly packed. Pixel-store PACK state is GLOBAL: any
-        // non-default value left here corrupts later glReadPixels/glGetTexImage calls
-        // by other code (e.g. the watut mod reads the framebuffer on screen render,
-        // and a leftover PACK_ROW_LENGTH made it write out of bounds -> NVIDIA driver
-        // crash). ROW_LENGTH=0 means "use the image width", which is what we want, so
-        // we never set it; ALIGNMENT=4 matches RGBA8. We restore everything to GL
-        // defaults afterwards so this method is hermetic.
+        // Pixel-store PACK state is GLOBAL: a non-default value left here corrupts
+        // later glReadPixels by other mods (a leftover PACK_ROW_LENGTH crashed the
+        // NVIDIA driver via the watut framebuffer read). Read tightly packed
+        // (ROW_LENGTH=0 = use image width) and restore defaults afterwards.
         glPixelStorei(GL_PACK_ROW_LENGTH, 0);
         glPixelStorei(GL_PACK_IMAGE_HEIGHT, 0);
         glPixelStorei(GL_PACK_SKIP_ROWS, 0);
         glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
         glPixelStorei(GL_PACK_ALIGNMENT, 4);
-        glGetTextureImage(glId, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture);
+
+        int[][] mips = new int[mipLevels][];
+        int[] mipW = new int[mipLevels];
+        int[] mipH = new int[mipLevels];
+        for (int lvl = 0; lvl < mipLevels; lvl++) {
+            int w = Math.max(1, width >> lvl);
+            int h = Math.max(1, height >> lvl);
+            mips[lvl] = new int[w * h];
+            mipW[lvl] = w;
+            mipH[lvl] = h;
+            glGetTextureImage(glId, lvl, GL_RGBA, GL_UNSIGNED_BYTE, mips[lvl]);
+        }
+
         // Restore pixel-store PACK state to GL defaults
         glPixelStorei(GL_PACK_ROW_LENGTH, 0);
         glPixelStorei(GL_PACK_IMAGE_HEIGHT, 0);
         glPixelStorei(GL_PACK_SKIP_ROWS, 0);
         glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
         glPixelStorei(GL_PACK_ALIGNMENT, 4);
-        this.rasterizer.setSamplerTexture(texture, width, height);
+
+        this.rasterizer.setSamplerMips(mips, mipW, mipH);
         this.textureLoaded = true;
     }
 
