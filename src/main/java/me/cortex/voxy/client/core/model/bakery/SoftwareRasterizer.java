@@ -47,22 +47,13 @@ public class SoftwareRasterizer {
     private int samplerHeight;
     private int[] samplerTexture;
 
-    // Atlas mip pyramid (level 0 = full res). Sampling picks the mip whose texel
-    // size matches the output footprint, replicating the GL bake's mipmapped
-    // texture() auto-LOD (GL_NEAREST_MIPMAP_LINEAR) — without this the nearest
-    // mip-0 sample undersamples (coarse blocks, see-through leaves).
-    private int[][] samplerMips;
-    private int[] samplerMipW;
-    private int[] samplerMipH;
-    private int samplerMipCount;
-    // Per-quad mip selection, computed in rasterQuad
-    private int curMipLow;
-    private int curMipHigh;
-    private float curMipFrac;
-    // Per-quad UV bounds (the sprite extent). Samples are clamped to the sprite's
-    // own texels so mip sampling never bleeds into adjacent atlas sprites, which
-    // produced sub-255 alpha on the edges of opaque blocks -> see-through seams.
-    private float curMinU, curMaxU, curMinV, curMaxV;
+    // Per-quad sampling params (set in rasterQuad). We area-average mip 0 over each
+    // output pixel's footprint, clamped to the quad's own sprite texels. This is a
+    // clean mipmap-like downscale that does NOT use MC's atlas mips, whose edge
+    // texels are bled with neighbouring sprites and produced stray (e.g. sky-blue)
+    // pixels on opaque LOD blocks. Footprint 1 = nearest (non-mipped/cutout = sharp).
+    private int curFootU, curFootV;
+    private int curSu0, curSu1, curSv0, curSv1;
 
     public SoftwareRasterizer(int targetSize) {
         this.targetSize = targetSize;
@@ -84,88 +75,62 @@ public class SoftwareRasterizer {
         this.samplerHeight = height;
     }
 
-    // Provide the atlas mip pyramid (level 0 first). mips[l].length must equal w[l]*h[l].
-    public void setSamplerMips(int[][] mips, int[] widths, int[] heights) {
-        this.samplerMips = mips;
-        this.samplerMipW = widths;
-        this.samplerMipH = heights;
-        this.samplerMipCount = mips.length;
-        // Keep the legacy single-mip fields pointing at mip 0 for any fallback path
-        this.samplerTexture = mips[0];
-        this.samplerWidth = widths[0];
-        this.samplerHeight = heights[0];
-    }
-
-    // Pick the mip(s) for a quad, given its UV footprint and whether it is mipped.
-    // forcedMip0 (non-mipped layers) -> always level 0, replicating the shader's -16
-    // LOD bias for non-mipped faces.
-    private void selectMipForQuad(boolean forcedMip0) {
+    // Compute per-quad sampling params: the sprite's texel bounds (so we never read
+    // adjacent sprites) and the per-output-pixel footprint for area averaging.
+    // forcedMip0 (non-mipped/cutout) -> footprint 1 = sharp nearest.
+    private void selectSampleParamsForQuad(boolean forcedMip0) {
+        int w = this.samplerWidth, h = this.samplerHeight;
         float minU = min4(this.qmuv1.y, this.qmuv2.y, this.qmuv3.y, this.qmuv4.y);
         float maxU = max4(this.qmuv1.y, this.qmuv2.y, this.qmuv3.y, this.qmuv4.y);
         float minV = min4(this.qmuv1.z, this.qmuv2.z, this.qmuv3.z, this.qmuv4.z);
         float maxV = max4(this.qmuv1.z, this.qmuv2.z, this.qmuv3.z, this.qmuv4.z);
-        this.curMinU = minU; this.curMaxU = maxU; this.curMinV = minV; this.curMaxV = maxV;
-        if (this.samplerMips == null || this.samplerMipCount <= 1 || forcedMip0) {
-            this.curMipLow = 0;
-            this.curMipHigh = 0;
-            this.curMipFrac = 0;
+        this.curSu0 = Math.clamp((int) Math.floor(minU * w), 0, w - 1);
+        this.curSu1 = Math.clamp((int) Math.ceil(maxU * w) - 1, this.curSu0, w - 1);
+        this.curSv0 = Math.clamp((int) Math.floor(minV * h), 0, h - 1);
+        this.curSv1 = Math.clamp((int) Math.ceil(maxV * h) - 1, this.curSv0, h - 1);
+        if (forcedMip0) {
+            this.curFootU = 1;
+            this.curFootV = 1;
             return;
         }
-        // sprite size in level-0 texels spanned by this quad
-        float spanTexels = Math.max((maxU - minU) * this.samplerMipW[0], (maxV - minV) * this.samplerMipH[0]);
-        // texels mapped to each output pixel of the face
-        float texelsPerOutput = spanTexels / this.targetSize;
-        float lod = (float) (Math.log(Math.max(texelsPerOutput, 1.0e-6f)) / Math.log(2.0));
-        lod = Math.clamp(lod, 0.0f, this.samplerMipCount - 1.0f);
-        this.curMipLow = (int) Math.floor(lod);
-        this.curMipHigh = Math.min(this.curMipLow + 1, this.samplerMipCount - 1);
-        this.curMipFrac = lod - this.curMipLow;
+        int spanU = this.curSu1 - this.curSu0 + 1;
+        int spanV = this.curSv1 - this.curSv0 + 1;
+        this.curFootU = Math.max(1, Math.round((float) spanU / this.targetSize));
+        this.curFootV = Math.max(1, Math.round((float) spanV / this.targetSize));
     }
 
     private static float min4(float a, float b, float c, float d) { return Math.min(Math.min(a, b), Math.min(c, d)); }
     private static float max4(float a, float b, float c, float d) { return Math.max(Math.max(a, b), Math.max(c, d)); }
 
-    private int sampleMip(int lvl, float u, float v) {
-        int w = this.samplerMipW[lvl];
-        int h = this.samplerMipH[lvl];
-        int pu = Math.round(u*w-0.5f);
-        int pv = Math.round(v*h-0.5f);
-        // Clamp to the sprite's own texel range in this mip so we never read a
-        // neighbouring atlas sprite (which bleeds sub-255 alpha onto opaque edges).
-        int su0 = Math.clamp((int) Math.floor(this.curMinU * w), 0, w - 1);
-        int su1 = Math.clamp((int) Math.ceil(this.curMaxU * w) - 1, su0, w - 1);
-        int sv0 = Math.clamp((int) Math.floor(this.curMinV * h), 0, h - 1);
-        int sv1 = Math.clamp((int) Math.ceil(this.curMaxV * h) - 1, sv0, h - 1);
-        pu = Math.clamp(pu, su0, su1);
-        pv = Math.clamp(pv, sv0, sv1);
-        return this.samplerMips[lvl][w*pv+pu];
-    }
-
+    // Area-average mip 0 over the output pixel's footprint, clamped to the sprite's
+    // own texels. Averaging fills cutout/leaf holes; clamping + mip-0-only keeps
+    // opaque blocks clean (no neighbour-sprite/mip bleed).
     private int sampleTexture(float u, float v) {
-        if (this.samplerMips == null) {
-            int pu = Math.clamp(Math.round(u*this.samplerWidth-0.5f), 0, this.samplerWidth-1);
-            int pv = Math.clamp(Math.round(v*this.samplerHeight-0.5f), 0, this.samplerHeight-1);
-            return this.samplerTexture[this.samplerWidth*pv+pu];
+        int w = this.samplerWidth;
+        int cu = Math.round(u*w - 0.5f);
+        int cv = Math.round(v*this.samplerHeight - 0.5f);
+        int fu = this.curFootU, fv = this.curFootV;
+        if (fu <= 1 && fv <= 1) {
+            int pu = Math.clamp(cu, this.curSu0, this.curSu1);
+            int pv = Math.clamp(cv, this.curSv0, this.curSv1);
+            return this.samplerTexture[w*pv+pu];
         }
-        int c0 = sampleMip(this.curMipLow, u, v);
-        if (this.curMipFrac <= 0.001f || this.curMipHigh == this.curMipLow) {
-            return c0;
+        int startU = cu - fu/2, startV = cv - fv/2;
+        int sumR = 0, sumG = 0, sumB = 0, sumA = 0, n = 0;
+        for (int dv = 0; dv < fv; dv++) {
+            int ty = Math.clamp(startV + dv, this.curSv0, this.curSv1);
+            for (int du = 0; du < fu; du++) {
+                int tx = Math.clamp(startU + du, this.curSu0, this.curSu1);
+                int c = this.samplerTexture[w*ty + tx];
+                sumR += c & 0xFF;
+                sumG += (c >> 8) & 0xFF;
+                sumB += (c >> 16) & 0xFF;
+                sumA += (c >>> 24) & 0xFF;
+                n++;
+            }
         }
-        // Trilinear between the two mips (matches GL_NEAREST_MIPMAP_LINEAR)
-        int c1 = sampleMip(this.curMipHigh, u, v);
-        return lerpABGR(c0, c1, this.curMipFrac);
-    }
-
-    // Per-channel lerp of two ABGR-packed colours (alpha included so cutout edges
-    // get the averaged coverage GL's mips produced).
-    private static int lerpABGR(int a, int b, float t) {
-        int ar = a & 0xFF, ag = (a >> 8) & 0xFF, ab = (a >> 16) & 0xFF, aa = (a >>> 24) & 0xFF;
-        int br = b & 0xFF, bg = (b >> 8) & 0xFF, bb = (b >> 16) & 0xFF, ba = (b >>> 24) & 0xFF;
-        int r = ar + Math.round((br - ar) * t);
-        int g = ag + Math.round((bg - ag) * t);
-        int bl = ab + Math.round((bb - ab) * t);
-        int al = aa + Math.round((ba - aa) * t);
-        return (al << 24) | (bl << 16) | (g << 8) | r;
+        int r = sumR / n, g = sumG / n, b = sumB / n, a = sumA / n;
+        return (a << 24) | (b << 16) | (g << 8) | r;
     }
 
     public void clear() {
@@ -193,7 +158,7 @@ public class SoftwareRasterizer {
         // face forces mip 0 (sharp), matching the bake shader's -16 LOD bias.
         int meta = Float.floatToRawIntBits(this.qmuv1.x);
         boolean forcedMip0 = ((meta >> 1) & 1) == 0;
-        this.selectMipForQuad(forcedMip0);
+        this.selectSampleParamsForQuad(forcedMip0);
 
         //0,1,2 | 2,3,0
         this.scratchR1.set(this.scratch1);
