@@ -8,7 +8,6 @@ import net.minecraft.client.renderer.ItemBlockRenderTypes;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
-import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.BlockAndTintGetter;
 import net.minecraft.world.level.ColorResolver;
@@ -68,11 +67,10 @@ public class SoftwareModelTextureBakery {
         int width = glGetTexLevelWidth(glId);
         int height = glGetTexLevelHeight(glId);
 
-        // Read the atlas mip pyramid so the rasterizer can pick the mip matching the
-        // output footprint (the GL bake relied on the GPU's mipmapped texture() to
-        // average sprites down to the 8px faces). Mip count = the atlas's mip levels.
-        int mipLevels = ((TextureAtlas) tex).mipLevel + 1;
-
+        // Read only mip 0 (full res). The rasterizer area-averages it per output
+        // footprint, which gives a clean downscale without MC's atlas mips — those
+        // bleed neighbouring sprites into a sprite's edge texels at higher levels and
+        // put stray (e.g. sky-blue) pixels on opaque LOD blocks.
         glFlush();
         glFinish();
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -87,17 +85,8 @@ public class SoftwareModelTextureBakery {
         glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
         glPixelStorei(GL_PACK_ALIGNMENT, 4);
 
-        int[][] mips = new int[mipLevels][];
-        int[] mipW = new int[mipLevels];
-        int[] mipH = new int[mipLevels];
-        for (int lvl = 0; lvl < mipLevels; lvl++) {
-            int w = Math.max(1, width >> lvl);
-            int h = Math.max(1, height >> lvl);
-            mips[lvl] = new int[w * h];
-            mipW[lvl] = w;
-            mipH[lvl] = h;
-            glGetTextureImage(glId, lvl, GL_RGBA, GL_UNSIGNED_BYTE, mips[lvl]);
-        }
+        int[] texture = new int[width * height];
+        glGetTextureImage(glId, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture);
 
         // Restore pixel-store PACK state to GL defaults
         glPixelStorei(GL_PACK_ROW_LENGTH, 0);
@@ -106,7 +95,7 @@ public class SoftwareModelTextureBakery {
         glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
         glPixelStorei(GL_PACK_ALIGNMENT, 4);
 
-        this.rasterizer.setSamplerMips(mips, mipW, mipH);
+        this.rasterizer.setSamplerTexture(texture, width, height);
         this.textureLoaded = true;
     }
 

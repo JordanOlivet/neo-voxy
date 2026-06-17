@@ -47,6 +47,14 @@ public class VoxyConfig {
     public boolean enabled = true;
     public boolean enableRendering = true;
     public boolean ingestEnabled = true;
+    /**
+     * Bake LOD model textures at 16px per face instead of 8px. Sharper near LODs
+     * (the model atlas mips still give 8px and lower farther out automatically), at
+     * the cost of a fixed ~512MB model atlas instead of ~128MB. Read once at startup
+     * (the atlas + occlusion masks are sized from it) — changing it requires a game
+     * restart.
+     */
+    public boolean highResModelTextures = false;
     public MultiplayerMode multiplayerMode = MultiplayerMode.AUTO;
     public int sectionRenderDistance = 16;
     public int serviceThreads = (int) Math.max(CpuLayout.getCoreCount() / 1.5, 1);
