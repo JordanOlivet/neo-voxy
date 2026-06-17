@@ -110,6 +110,10 @@ public class ModelBakerySubsystem {
     //This is on this side only and done like this as only worker threads call this code
     private final ReentrantLock seenIdsLock = new ReentrantLock();
     private final IntOpenHashSet seenIds = new IntOpenHashSet(6000);//TODO: move to a lock free concurrent hashmap
+    // Out-of-range stateIds reported at most once each. Without this dedup the
+    // reject path below spammed a full stack trace per bad id per render tick,
+    // starving the render thread (see "out of range state id" freeze report).
+    private final IntOpenHashSet outOfRangeSeen = new IntOpenHashSet();
     /**
      * Enqueue a bake for {@code blockId}. Returns {@code true} when this is the
      * first time the id has been seen (so callers can gate one-shot log emits on
@@ -121,8 +125,17 @@ public class ModelBakerySubsystem {
      * callers a single source of truth.
      */
     public boolean requestBlockBake(int blockId) {
-        if (this.mapper.getBlockStateCount() < blockId) {
-            Logger.error("Error, got bakeing request for out of range state id. StateId: " + blockId + " max id: " + this.mapper.getBlockStateCount(), new Exception());
+        // Valid ids are 0..count-1. Guard with >= (was <, which let blockId == count
+        // through to an out-of-bounds bake). No new Exception() / ERROR here: this runs
+        // on the render hot path and a bad id is re-offered every tick, so capturing a
+        // stack trace per call froze the game. Log once per id at WARN instead.
+        if (blockId < 0 || blockId >= this.mapper.getBlockStateCount()) {
+            this.seenIdsLock.lock();
+            boolean firstReport = this.outOfRangeSeen.add(blockId);
+            this.seenIdsLock.unlock();
+            if (firstReport) {
+                Logger.warn("Skipping bake for out-of-range state id " + blockId + " (max " + this.mapper.getBlockStateCount() + ")");
+            }
             return false;
         }
         this.seenIdsLock.lock();
