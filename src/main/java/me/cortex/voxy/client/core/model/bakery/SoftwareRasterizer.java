@@ -116,20 +116,35 @@ public class SoftwareRasterizer {
             return this.samplerTexture[w*pv+pu];
         }
         int startU = cu - fu/2, startV = cv - fv/2;
-        int sumR = 0, sumG = 0, sumB = 0, sumA = 0, n = 0;
+        // Alpha-weighted (premultiplied) RGB average: transparent texels must NOT
+        // drag the colour toward black, otherwise foliage looks dark/over-heavy.
+        // Alpha is a straight average so leaves keep their natural see-through gaps
+        // (aeration). Matches MC's atlas mip generation.
+        long sumR = 0, sumG = 0, sumB = 0, sumA = 0, sumW = 0;
+        int n = 0;
         for (int dv = 0; dv < fv; dv++) {
             int ty = Math.clamp(startV + dv, this.curSv0, this.curSv1);
             for (int du = 0; du < fu; du++) {
                 int tx = Math.clamp(startU + du, this.curSu0, this.curSu1);
                 int c = this.samplerTexture[w*ty + tx];
-                sumR += c & 0xFF;
-                sumG += (c >> 8) & 0xFF;
-                sumB += (c >> 16) & 0xFF;
-                sumA += (c >>> 24) & 0xFF;
+                int a = (c >>> 24) & 0xFF;
+                sumR += (long) (c & 0xFF) * a;
+                sumG += (long) ((c >> 8) & 0xFF) * a;
+                sumB += (long) ((c >> 16) & 0xFF) * a;
+                sumA += a;
+                sumW += a;
                 n++;
             }
         }
-        int r = sumR / n, g = sumG / n, b = sumB / n, a = sumA / n;
+        int a = (int) (sumA / n);
+        int r, g, b;
+        if (sumW > 0) {
+            r = (int) (sumR / sumW);
+            g = (int) (sumG / sumW);
+            b = (int) (sumB / sumW);
+        } else {
+            r = 0; g = 0; b = 0;
+        }
         return (a << 24) | (b << 16) | (g << 8) | r;
     }
 
