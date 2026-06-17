@@ -44,6 +44,11 @@ import static org.lwjgl.opengl.GL30C.glBindFramebuffer;
 public class SoftwareModelTextureBakery {
     private static final Matrix4f[] VIEWS = new Matrix4f[6];
 
+    // Block models are extracted off-thread safely (Sodium meshes chunks the same
+    // way), but the shared vanilla fluid renderer may not be thread-safe, so fluid
+    // baking (rare) is serialised across bake threads.
+    private static final Object FLUID_BAKE_LOCK = new Object();
+
     private final ReuseVertexConsumer vc = new ReuseVertexConsumer();
     private final SoftwareRasterizer rasterizer = new SoftwareRasterizer(ModelFactory.MODEL_TEXTURE_SIZE);
 
@@ -60,7 +65,13 @@ public class SoftwareModelTextureBakery {
     // Reads the block atlas pixels into the rasterizer's sampler. Must run on the
     // render thread (needs the GL context). Lazily done on first bake / can be
     // forced after a resource reload via reloadAtlas().
-    public void setupTexture() {
+    // Shared, immutable atlas pixel data. Read once on the render thread, then shared
+    // (read-only) by every per-thread bakery so baking can run on multiple workers.
+    public record Atlas(int[] pixels, int width, int height) {}
+
+    // Reads the block atlas mip 0 on the render thread (needs the GL context). The
+    // returned data is immutable and safe to share across baking threads.
+    public static Atlas loadAtlas() {
         var tex = Minecraft.getInstance().getTextureManager()
                 .getTexture(ResourceLocation.fromNamespaceAndPath("minecraft", "textures/atlas/blocks.png"));
         int glId = tex.getId();
@@ -85,8 +96,8 @@ public class SoftwareModelTextureBakery {
         glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
         glPixelStorei(GL_PACK_ALIGNMENT, 4);
 
-        int[] texture = new int[width * height];
-        glGetTextureImage(glId, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture);
+        int[] pixels = new int[width * height];
+        glGetTextureImage(glId, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 
         // Restore pixel-store PACK state to GL defaults
         glPixelStorei(GL_PACK_ROW_LENGTH, 0);
@@ -95,8 +106,20 @@ public class SoftwareModelTextureBakery {
         glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
         glPixelStorei(GL_PACK_ALIGNMENT, 4);
 
-        this.rasterizer.setSamplerTexture(texture, width, height);
+        return new Atlas(pixels, width, height);
+    }
+
+    // Point this bakery's rasterizer at a (shared, read-only) atlas. The rasterizer
+    // only reads it; its scratch/framebuffer is per-instance, so several bakeries can
+    // share one Atlas and bake in parallel.
+    public void setAtlas(Atlas atlas) {
+        this.rasterizer.setSamplerTexture(atlas.pixels(), atlas.width(), atlas.height());
         this.textureLoaded = true;
+    }
+
+    // Convenience: load + set on the render thread (single-threaded path / tests).
+    public void setupTexture() {
+        this.setAtlas(loadAtlas());
     }
 
     public void reloadAtlas() {
@@ -138,6 +161,7 @@ public class SoftwareModelTextureBakery {
             metadata |= 4;//Has tint
             this.vc.setDefaultMeta(metadata);
         }
+        synchronized (FLUID_BAKE_LOCK) {
         Minecraft.getInstance().getBlockRenderer().renderLiquid(BlockPos.ZERO, new BlockAndTintGetter() {
             @Override
             public float getShade(Direction direction, boolean shaded) {
@@ -191,6 +215,7 @@ public class SoftwareModelTextureBakery {
                 return 0;
             }
         }, this.vc, state, state.getFluidState());
+        }
         this.vc.setDefaultMeta(0);
     }
 

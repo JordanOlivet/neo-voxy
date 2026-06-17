@@ -6,6 +6,8 @@ import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.VoxyDiag;
 import me.cortex.voxy.common.world.other.Mapper;
 import java.util.List;
+import me.cortex.voxy.common.util.cpu.CpuLayout;
+
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
@@ -20,22 +22,49 @@ public class ModelBakerySubsystem {
     private final AtomicInteger blockIdCount = new AtomicInteger();
     private final ConcurrentLinkedDeque<Integer> blockIdQueue = new ConcurrentLinkedDeque<>();//TODO: replace with custom DS
 
-    private final Thread processingThread;
+    // Several bake threads rasterize models in parallel (each uses its own per-thread
+    // bakery, sharing the read-only atlas); a single processor thread turns finished
+    // bakes into uploadable textures (that path mutates shared model-id state and must
+    // stay single-threaded). Render-thread tick only loads the atlas + uploads.
+    private final Thread[] bakeThreads;
+    private final Thread processThread;
+    // Bake threads wait on this when the bake queue is empty; producers (the atlas
+    // load and requestBlockBake) notify it. Using a dedicated monitor avoids the
+    // bake threads busy-spinning on the factory's process-work condition.
+    private final Object bakeNotifier = new Object();
     private volatile boolean isRunning = true;
     public ModelBakerySubsystem(Mapper mapper) {
         this.mapper = mapper;
         this.factory = new ModelFactory(mapper, this.storage);
-        this.processingThread = new Thread(()->{
-            // The bake itself (software CPU rasterization) now runs HERE, off the
-            // render thread, instead of synchronously in tick(). The render thread
-            // only pre-loads the block atlas (setupTexture) and uploads finished
-            // textures. Blocks on the factory's work monitor when idle; the 100 ms
-            // timeout is a safety net for missed notifies.
-            while (this.isRunning) {
-                // Only bake once the atlas has been read on the render thread
-                if (this.factory.bakery.isAtlasLoaded()) {
-                    this.drainBakeQueue();
+
+        int bakeThreadCount = Math.clamp(CpuLayout.getCoreCount() / 2, 1, 6);
+        this.bakeThreads = new Thread[bakeThreadCount];
+        for (int t = 0; t < bakeThreadCount; t++) {
+            this.bakeThreads[t] = new Thread(() -> {
+                while (this.isRunning) {
+                    int baked = 0;
+                    // Only bake once the atlas has been read on the render thread
+                    if (this.factory.isAtlasLoaded()) {
+                        baked = this.drainBakeQueue();
+                    }
+                    if (baked == 0) {
+                        // No bake work; wait for new queue entries (or the 100ms net)
+                        synchronized (this.bakeNotifier) {
+                            try {
+                                this.bakeNotifier.wait(100);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                break;
+                            }
+                        }
+                    }
                 }
+            }, "Voxy model bake #" + t);
+            this.bakeThreads[t].start();
+        }
+
+        this.processThread = new Thread(() -> {
+            while (this.isRunning) {
                 this.factory.processAllThings();
                 try {
                     this.factory.waitForWork(100);
@@ -44,16 +73,16 @@ public class ModelBakerySubsystem {
                     break;
                 }
             }
-        }, "Model factory processor");
-        this.processingThread.start();
+        }, "Voxy model processor");
+        this.processThread.start();
     }
 
     public void tick(long totalBudget) {
-        // Pre-load the block atlas into the software bakery once, on the render
-        // thread (needs the GL context). The worker thread bakes only after this.
-        if (!this.factory.bakery.isAtlasLoaded()) {
-            this.factory.bakery.setupTexture();
-            this.factory.signalWork();//wake the worker now that it can bake
+        // Pre-load the block atlas once, on the render thread (needs the GL context).
+        // The bake threads only bake after this.
+        if (!this.factory.isAtlasLoaded()) {
+            this.factory.loadAtlas();
+            this.wakeBakeThreads();//atlas ready -> bake threads can start
         }
 
         // The render thread no longer bakes (that moved to the worker thread). It
@@ -67,27 +96,40 @@ public class ModelBakerySubsystem {
         }
     }
 
-    // Runs on the model worker thread: drain pending bake requests and CPU-bake them.
-    private void drainBakeQueue() {
+    // Runs on a bake thread: drain pending bake requests and CPU-bake them in
+    // parallel (each thread uses its own bakery). Returns how many were baked.
+    private int drainBakeQueue() {
         Integer i = this.blockIdQueue.poll();
         int j = 0;
         while (i != null) {
             this.factory.addEntry(i);
             j++;
-            // Yield back periodically so finished bakes get processed into uploads
-            // and we don't hold everything until the queue is fully drained
+            // Yield back periodically so other bake threads share the queue and the
+            // processor turns finished bakes into uploads
             if (j >= 64) break;
             i = this.blockIdQueue.poll();
         }
         if (j != 0) {
             this.blockIdCount.addAndGet(-j);
         }
+        return j;
+    }
+
+    private void wakeBakeThreads() {
+        synchronized (this.bakeNotifier) {
+            this.bakeNotifier.notifyAll();
+        }
     }
 
     public void shutdown() {
         this.isRunning = false;
+        this.wakeBakeThreads();// wake any waiting bake threads so they see !isRunning
+        this.factory.signalWork();// wake the processor thread too
         try {
-            this.processingThread.join();
+            for (var t : this.bakeThreads) {
+                t.join();
+            }
+            this.processThread.join();
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }
@@ -135,7 +177,7 @@ public class ModelBakerySubsystem {
         this.seenIdsLock.unlock();
         this.blockIdQueue.add(blockId);
         this.blockIdCount.incrementAndGet();
-        this.factory.signalWork();//wake the worker so it bakes promptly
+        this.wakeBakeThreads();//wake a bake thread so it bakes promptly
         return true;
     }
 
