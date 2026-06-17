@@ -59,6 +59,10 @@ public class SoftwareRasterizer {
     private int curMipLow;
     private int curMipHigh;
     private float curMipFrac;
+    // Per-quad UV bounds (the sprite extent). Samples are clamped to the sprite's
+    // own texels so mip sampling never bleeds into adjacent atlas sprites, which
+    // produced sub-255 alpha on the edges of opaque blocks -> see-through seams.
+    private float curMinU, curMaxU, curMinV, curMaxV;
 
     public SoftwareRasterizer(int targetSize) {
         this.targetSize = targetSize;
@@ -96,16 +100,17 @@ public class SoftwareRasterizer {
     // forcedMip0 (non-mipped layers) -> always level 0, replicating the shader's -16
     // LOD bias for non-mipped faces.
     private void selectMipForQuad(boolean forcedMip0) {
+        float minU = min4(this.qmuv1.y, this.qmuv2.y, this.qmuv3.y, this.qmuv4.y);
+        float maxU = max4(this.qmuv1.y, this.qmuv2.y, this.qmuv3.y, this.qmuv4.y);
+        float minV = min4(this.qmuv1.z, this.qmuv2.z, this.qmuv3.z, this.qmuv4.z);
+        float maxV = max4(this.qmuv1.z, this.qmuv2.z, this.qmuv3.z, this.qmuv4.z);
+        this.curMinU = minU; this.curMaxU = maxU; this.curMinV = minV; this.curMaxV = maxV;
         if (this.samplerMips == null || this.samplerMipCount <= 1 || forcedMip0) {
             this.curMipLow = 0;
             this.curMipHigh = 0;
             this.curMipFrac = 0;
             return;
         }
-        float minU = min4(this.qmuv1.y, this.qmuv2.y, this.qmuv3.y, this.qmuv4.y);
-        float maxU = max4(this.qmuv1.y, this.qmuv2.y, this.qmuv3.y, this.qmuv4.y);
-        float minV = min4(this.qmuv1.z, this.qmuv2.z, this.qmuv3.z, this.qmuv4.z);
-        float maxV = max4(this.qmuv1.z, this.qmuv2.z, this.qmuv3.z, this.qmuv4.z);
         // sprite size in level-0 texels spanned by this quad
         float spanTexels = Math.max((maxU - minU) * this.samplerMipW[0], (maxV - minV) * this.samplerMipH[0]);
         // texels mapped to each output pixel of the face
@@ -123,8 +128,16 @@ public class SoftwareRasterizer {
     private int sampleMip(int lvl, float u, float v) {
         int w = this.samplerMipW[lvl];
         int h = this.samplerMipH[lvl];
-        int pu = Math.clamp(Math.round(u*w-0.5f), 0, w-1);
-        int pv = Math.clamp(Math.round(v*h-0.5f), 0, h-1);
+        int pu = Math.round(u*w-0.5f);
+        int pv = Math.round(v*h-0.5f);
+        // Clamp to the sprite's own texel range in this mip so we never read a
+        // neighbouring atlas sprite (which bleeds sub-255 alpha onto opaque edges).
+        int su0 = Math.clamp((int) Math.floor(this.curMinU * w), 0, w - 1);
+        int su1 = Math.clamp((int) Math.ceil(this.curMaxU * w) - 1, su0, w - 1);
+        int sv0 = Math.clamp((int) Math.floor(this.curMinV * h), 0, h - 1);
+        int sv1 = Math.clamp((int) Math.ceil(this.curMaxV * h) - 1, sv0, h - 1);
+        pu = Math.clamp(pu, su0, su1);
+        pv = Math.clamp(pv, sv0, sv1);
         return this.samplerMips[lvl][w*pv+pu];
     }
 
