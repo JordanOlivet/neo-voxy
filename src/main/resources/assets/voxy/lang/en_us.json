@@ -32,6 +32,8 @@
   "voxy.config.general.renderDistance.tooltip": "The render distance in chunks (set to -1 to disable chunk unloading)",
   "voxy.config.general.vanilla_fog": "Use Vanilla Fog",
   "voxy.config.general.vanilla_fog.tooltip": "Apply Minecraft's vanilla fog to LoD chunks. Disable for a cleaner long-distance view.",
+  "voxy.config.general.high_res_model_textures": "High-Res Model Textures (16px)",
+  "voxy.config.general.high_res_model_textures.tooltip": "Bake LoD block textures at 16px per face instead of 8px, for sharper nearby LoDs. Farther LoDs stay 8px or lower automatically (atlas mipmaps), so only close-up detail improves. Costs more VRAM: the model atlas is a fixed ~512MB instead of ~128MB (independent of modpack size). Requires a game restart to apply.",
   "voxy.config.general.render_statistics": "Show Render Statistics",
   "voxy.config.general.render_statistics.tooltip": "Displays Voxy's render-side counters (sections drawn, geometry size, GPU memory) on the F3 debug overlay.",
   "voxy.config.general.debug_dump_on_screenshot": "Debug Dump On Screenshot",

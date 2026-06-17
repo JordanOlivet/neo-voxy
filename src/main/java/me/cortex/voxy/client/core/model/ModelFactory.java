@@ -65,13 +65,14 @@ import static org.lwjgl.opengl.GL11.*;
 //TODO: NOTE!!! is it worth even uploading as a 16x16 texture, since automatic lod selection... doing 8x8 textures might be perfectly ok!!!
 // this _quarters_ the memory requirements for the texture atlas!!! WHICH IS HUGE saving
 public class ModelFactory {
-    // Resolved (2026-04-28): step 5 — atlas downscaled 16→8.
-    // VRAM atlas: 512 MiB → 128 MiB (-384 MiB). Per-face occlusion mask shrinks
-    // from 256 bits (4 longs) to 64 bits (1 long), heap cache 12 MiB → 3 MiB.
-    // Auto-LOD selection in the sampler picks mip 1+ at typical Voxy distances,
-    // so the lost mip-0 detail is rarely visible. If a regression is reported,
-    // bump back to 16 here and OCCLUSION_MASK_LONGS_PER_FACE to 4.
-    public static final int MODEL_TEXTURE_SIZE = 8;
+    // Per-face baked texture resolution. 8px (default) -> ~128MB model atlas; 16px
+    // (VoxyConfig.highResModelTextures) -> ~512MB but sharper near LODs. The model
+    // atlas mips give 8px and lower farther out either way, so 16px only adds detail
+    // up close. Read ONCE at class init from the config (a static final, so it is
+    // fixed for the JVM run) -> changing the option needs a restart. Everything
+    // derived from it (atlas dims, occlusion mask longs, mip count) follows.
+    public static final int MODEL_TEXTURE_SIZE =
+            me.cortex.voxy.client.config.VoxyConfig.CONFIG.highResModelTextures ? 16 : 8;
 
     // TODO: replace the fluid BlockState with a client model id integer of the
     // fluidState, requires looking up
@@ -134,7 +135,7 @@ public class ModelFactory {
     // this has an issue with scaffolding i believe tho, so maybe make it a
     // probability to render??? idk
     private final long[] metadataCache;
-    public static final int OCCLUSION_MASK_LONGS_PER_FACE = 1;//8x8 bits = 64 bits = 1 long (was 4 at MODEL_TEXTURE_SIZE=16)
+    public static final int OCCLUSION_MASK_LONGS_PER_FACE = (MODEL_TEXTURE_SIZE * MODEL_TEXTURE_SIZE + 63) / 64;//64 bits per long; 1 long at 8px, 4 longs at 16px
     private static final int OCCLUSION_MASK_LONGS_PER_BLOCKSTATE = 6 * OCCLUSION_MASK_LONGS_PER_FACE;//6
     private final long[] faceOcclusionMaskCache;
     private final int[] fluidStateLUT;
@@ -671,19 +672,23 @@ public class ModelFactory {
             metadata |= occludesFace ? 1 : 0;
             fullyOpaque &= occludesFace;
 
-            // Per-face 8x8 = 64-bit pixel coverage mask, packed in 1 long.
+            // Per-face pixel coverage mask: 1 bit per texel (index = x + y*size),
+            // packed across OCCLUSION_MASK_LONGS_PER_FACE longs (1 at 8px, 4 at 16px).
             // Mirrors `occludesFace` semantics: empty mask if face doesn't occlude
-            // (translucent or far-from-flush), otherwise bit (x + y*8) = pixel written.
+            // (translucent or far-from-flush), otherwise bit set = pixel written.
             {
-                long m0 = 0;
+                int maskBase = (modelId * 6 + face) * OCCLUSION_MASK_LONGS_PER_FACE;
+                for (int l = 0; l < OCCLUSION_MASK_LONGS_PER_FACE; l++) {
+                    this.faceOcclusionMaskCache[maskBase + l] = 0L;
+                }
                 if (occludesFace) {
                     final var faceTex = textureData[face];
                     for (int idx = 0; idx < MODEL_TEXTURE_SIZE * MODEL_TEXTURE_SIZE; idx++) {
-                        if (TextureUtils.wasPixelWritten(faceTex, checkMode, idx)) m0 |= 1L << idx;
+                        if (TextureUtils.wasPixelWritten(faceTex, checkMode, idx)) {
+                            this.faceOcclusionMaskCache[maskBase + (idx >> 6)] |= 1L << (idx & 63);
+                        }
                     }
                 }
-                int maskBase = (modelId * 6 + face) * OCCLUSION_MASK_LONGS_PER_FACE;
-                this.faceOcclusionMaskCache[maskBase] = m0;
             }
 
             boolean canBeOccluded = true;
@@ -1153,9 +1158,15 @@ public class ModelFactory {
     public boolean isFaceFullyOccludedBy(int selfClientId, int selfFace, int neighborClientId, int neighborFace) {
         int sBase = (selfClientId * 6 + selfFace) * OCCLUSION_MASK_LONGS_PER_FACE;
         int nBase = (neighborClientId * 6 + neighborFace) * OCCLUSION_MASK_LONGS_PER_FACE;
-        long s0 = this.faceOcclusionMaskCache[sBase];
-        if ((s0 & ~this.faceOcclusionMaskCache[nBase]) != 0L) return false;
-        return s0 != 0L;
+        // Every set self pixel must also be set in the neighbor (across all longs),
+        // and the self mask must be non-empty.
+        boolean anySelfSet = false;
+        for (int l = 0; l < OCCLUSION_MASK_LONGS_PER_FACE; l++) {
+            long s = this.faceOcclusionMaskCache[sBase + l];
+            if ((s & ~this.faceOcclusionMaskCache[nBase + l]) != 0L) return false;
+            anySelfSet |= s != 0L;
+        }
+        return anySelfSet;
     }
 
     private static int computeSizeWithMips(int size) {
