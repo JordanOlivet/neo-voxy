@@ -58,6 +58,13 @@ public class VoxyConfig {
     public MultiplayerMode multiplayerMode = MultiplayerMode.AUTO;
     public int sectionRenderDistance = 16;
     public int serviceThreads = (int) Math.max(CpuLayout.getCoreCount() / 1.5, 1);
+    /**
+     * Number of worker threads used to bake LOD block-model textures. Baking is CPU
+     * work that bursts on first connect / resource reload, so more threads reach full
+     * LOD detail faster. Default is a conservative half-cores (capped at 6). Applied
+     * when the renderer is (re)created — toggle Voxy rendering or rejoin to apply.
+     */
+    public int bakeThreads = Math.clamp(CpuLayout.getCoreCount() / 2, 1, 6);
     public float subDivisionSize = 64;
     public boolean renderVanillaFog = false;
     public boolean renderStatistics = false;

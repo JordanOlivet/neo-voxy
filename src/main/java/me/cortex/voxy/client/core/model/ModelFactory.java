@@ -88,7 +88,31 @@ public class ModelFactory {
     private final Biome DEFAULT_BIOME = Minecraft.getInstance().level.registryAccess().lookupOrThrow(Registries.BIOME)
             .getOrThrow(Biomes.PLAINS).value();
 
-    public final SoftwareModelTextureBakery bakery;
+    // Software bakery is per-thread: its rasterizer + vertex consumers are not
+    // thread-safe, but the atlas is shared read-only, so baking can run on several
+    // worker threads at once. The atlas is read once on the render thread (loadAtlas)
+    // and shared with every per-thread bakery. allBakeries tracks created instances
+    // so free() can release their native vertex-consumer buffers.
+    private volatile SoftwareModelTextureBakery.Atlas sharedAtlas;
+    private final List<SoftwareModelTextureBakery> allBakeries = Collections.synchronizedList(new ArrayList<>());
+    private final ThreadLocal<SoftwareModelTextureBakery> bakeryTL = ThreadLocal.withInitial(() -> {
+        var b = new SoftwareModelTextureBakery();
+        var atlas = this.sharedAtlas;
+        if (atlas != null) {
+            b.setAtlas(atlas);
+        }
+        this.allBakeries.add(b);
+        return b;
+    });
+
+    // Read the block atlas once on the render thread; per-thread bakeries pick it up.
+    public void loadAtlas() {
+        this.sharedAtlas = SoftwareModelTextureBakery.loadAtlas();
+    }
+
+    public boolean isAtlasLoaded() {
+        return this.sharedAtlas != null;
+    }
 
     // Model data might also contain a constant colour if the colour resolver
     // produces a constant colour, this saves space in the
@@ -197,7 +221,6 @@ public class ModelFactory {
     public ModelFactory(Mapper mapper, ModelStore storage) {
         this.mapper = mapper;
         this.storage = storage;
-        this.bakery = new SoftwareModelTextureBakery();
 
         this.metadataCache = new long[1 << 16];
         this.faceOcclusionMaskCache = new long[(1 << 16) * OCCLUSION_MASK_LONGS_PER_BLOCKSTATE];
@@ -264,6 +287,8 @@ public class ModelFactory {
         // check that it is currently not inflight, if it is, return as its already
         // being baked
         // else add it to the flight as it is going to be baked
+        // Reserve the block under the lock (dedup), then bake OUTSIDE the lock so
+        // multiple worker threads can rasterize in parallel.
         this.blockStatesInFlightLock.lock();
         try {
             if (!this.blockStatesInFlight.add(blockId)) {
@@ -273,26 +298,21 @@ public class ModelFactory {
 
             VarHandle.loadLoadFence();
 
-            // The enqueue must happen inside the lock: the order in which blocks are
-            // added to blockStatesInFlight must be the order they are enqueued for
-            // baking, otherwise a concurrent addEntry can interleave them
-
             // We need to get it twice cause of threading
             if (this.idMappings[blockId] != -1) {
                 return false;
             }
-
-            RawBakeResult result = new RawBakeResult(blockId, blockState);
-            //CPU software bake, synchronous, into the result buffer. addEntry runs on
-            //the model worker thread (off the render thread); the atlas was pre-loaded
-            //on the render thread via the bakery's setupTexture.
-            this.bakery.renderToOutput(blockState, result.rawData.address);
-            this.rawBakeResults.add(result);
-            this.signalWork();
-            return true;
         } finally {
             this.blockStatesInFlightLock.unlock();
         }
+
+        // The block is now reserved in blockStatesInFlight (dedup done). Bake on this
+        // thread's own bakery (per-thread rasterizer + VCs, shared read-only atlas).
+        RawBakeResult result = new RawBakeResult(blockId, blockState);
+        this.bakeryTL.get().renderToOutput(blockState, result.rawData.address);
+        this.rawBakeResults.add(result);
+        this.signalWork();
+        return true;
     }
 
     private boolean processModelResult() {
@@ -1231,7 +1251,12 @@ public class ModelFactory {
     }
 
     public void free() {
-        this.bakery.free();
+        synchronized (this.allBakeries) {
+            for (var b : this.allBakeries) {
+                b.free();
+            }
+            this.allBakeries.clear();
+        }
         this.downstream.free();
         while (!this.rawBakeResults.isEmpty()) {
             this.rawBakeResults.poll().rawData.free();

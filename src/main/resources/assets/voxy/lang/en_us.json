@@ -9,6 +9,8 @@
   "voxy.config.general.enabled.tooltip": "Fully enables or disables voxy",
   "voxy.config.general.serviceThreads": "Service Threads",
   "voxy.config.general.serviceThreads.tooltip": "Number of background threads Voxy uses for ingest, saving and mesh building. Higher values trade CPU for faster LoD updates.",
+  "voxy.config.general.bakeThreads": "Model Bake Threads",
+  "voxy.config.general.bakeThreads.tooltip": "Number of threads used to bake LoD block-model textures. Baking bursts on first connect and resource reloads, so more threads reach full LoD detail faster (at the cost of more CPU during those bursts). Default is half your cores (capped at 6). Applied when the renderer reloads — toggle Voxy rendering off/on or rejoin the world to apply.",
   "voxy.config.general.useSodiumBuilder": "Use Sodium Builder Threads",
   "voxy.config.general.useSodiumBuilder.tooltip": "Allows Voxy to share Sodium's chunk builder threads for LoD mesh generation. Disable to keep Voxy strictly on its own dedicated threads.",
   "voxy.config.general.ingest": "Chunk Ingest",
