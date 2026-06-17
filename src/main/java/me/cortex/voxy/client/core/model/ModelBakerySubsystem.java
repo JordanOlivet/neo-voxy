@@ -37,7 +37,7 @@ public class ModelBakerySubsystem {
         this.mapper = mapper;
         this.factory = new ModelFactory(mapper, this.storage);
 
-        int bakeThreadCount = Math.clamp(CpuLayout.getCoreCount() / 2, 1, 6);
+        int bakeThreadCount = Math.clamp(me.cortex.voxy.client.config.VoxyConfig.CONFIG.bakeThreads, 1, CpuLayout.getCoreCount());
         this.bakeThreads = new Thread[bakeThreadCount];
         for (int t = 0; t < bakeThreadCount; t++) {
             this.bakeThreads[t] = new Thread(() -> {
