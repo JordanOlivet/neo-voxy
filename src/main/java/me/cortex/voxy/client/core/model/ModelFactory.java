@@ -8,7 +8,7 @@ import it.unimi.dsi.fastutil.objects.ObjectSet;
 import me.cortex.voxy.client.core.gl.Capabilities;
 import me.cortex.voxy.client.core.gl.GlBuffer;
 import me.cortex.voxy.client.core.gl.GlTexture;
-import me.cortex.voxy.client.core.model.bakery.ModelTextureBakery;
+import me.cortex.voxy.client.core.model.bakery.SoftwareModelTextureBakery;
 import me.cortex.voxy.client.core.rendering.util.RawDownloadStream;
 import me.cortex.voxy.client.core.rendering.util.UploadStream;
 import me.cortex.voxy.common.Logger;
@@ -87,7 +87,7 @@ public class ModelFactory {
     private final Biome DEFAULT_BIOME = Minecraft.getInstance().level.registryAccess().lookupOrThrow(Registries.BIOME)
             .getOrThrow(Biomes.PLAINS).value();
 
-    public final ModelTextureBakery bakery;
+    public final SoftwareModelTextureBakery bakery;
 
     // Model data might also contain a constant colour if the colour resolver
     // produces a constant colour, this saves space in the
@@ -169,7 +169,7 @@ public class ModelFactory {
     // for missed notifies.
     private final Object workNotifier = new Object();
 
-    private void signalWork() {
+    public void signalWork() {
         synchronized (this.workNotifier) {
             this.workNotifier.notifyAll();
         }
@@ -196,7 +196,7 @@ public class ModelFactory {
     public ModelFactory(Mapper mapper, ModelStore storage) {
         this.mapper = mapper;
         this.storage = storage;
-        this.bakery = new ModelTextureBakery(MODEL_TEXTURE_SIZE, MODEL_TEXTURE_SIZE);
+        this.bakery = new SoftwareModelTextureBakery();
 
         this.metadataCache = new long[1 << 16];
         this.faceOcclusionMaskCache = new long[(1 << 16) * OCCLUSION_MASK_LONGS_PER_BLOCKSTATE];
@@ -282,12 +282,12 @@ public class ModelFactory {
             }
 
             RawBakeResult result = new RawBakeResult(blockId, blockState);
-            int allocation = this.downstream.download(MODEL_TEXTURE_SIZE * MODEL_TEXTURE_SIZE * 2 * 4 * 6,
-                    ptr -> {
-                        this.rawBakeResults.add(result.cpyBuf(ptr));
-                        this.signalWork();
-                    });
-            this.bakery.renderToStream(blockState, this.downstream.getBufferId(), allocation);
+            //CPU software bake, synchronous, into the result buffer. addEntry runs on
+            //the model worker thread (off the render thread); the atlas was pre-loaded
+            //on the render thread via the bakery's setupTexture.
+            this.bakery.renderToOutput(blockState, result.rawData.address);
+            this.rawBakeResults.add(result);
+            this.signalWork();
             return true;
         } finally {
             this.blockStatesInFlightLock.unlock();
