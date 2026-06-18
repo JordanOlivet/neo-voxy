@@ -122,8 +122,11 @@ public abstract class VoxyInstance {
         }
         if (world == null) {// If the cached world is null, try get from the active worlds
             long stamp = this.activeWorldLock.readLock();
-            world = this.activeWorlds.get(identifier);
-            this.activeWorldLock.unlockRead(stamp);
+            try {
+                world = this.activeWorlds.get(identifier);
+            } finally {
+                this.activeWorldLock.unlockRead(stamp);
+            }
             if (world != null) {// Setup cache
                 identifier.cachedEngineObject = new WeakReference<>(world);
             }
@@ -145,19 +148,22 @@ public abstract class VoxyInstance {
             return world;
         }
         long stamp = this.activeWorldLock.writeLock();
+        try {
+            if (!this.isRunning) {
+                Logger.error("Tried getting world object on voxy instance but its not running");
+                return null;
+            }
 
-        if (!this.isRunning) {
-            Logger.error("Tried getting world object on voxy instance but its not running");
+            world = this.activeWorlds.get(identifier);
+            if (world == null) {
+                // Create world here
+                world = this.createWorld(identifier);
+            }
+        } finally {
+            // Always release the write lock, even if createWorld throws, otherwise the
+            // leaked lock permanently deadlocks every reader (chunk load, cleanIdle).
             this.activeWorldLock.unlockWrite(stamp);
-            return null;
         }
-
-        world = this.activeWorlds.get(identifier);
-        if (world == null) {
-            // Create world here
-            world = this.createWorld(identifier);
-        }
-        this.activeWorldLock.unlockWrite(stamp);
         identifier.cachedEngineObject = new WeakReference<>(world);
         return world;
     }
@@ -182,32 +188,38 @@ public abstract class VoxyInstance {
         List<WorldIdentifier> idleWorlds = null;
         {
             long stamp = this.activeWorldLock.readLock();
-            for (var pair : this.activeWorlds.entrySet()) {
-                if (pair.getValue().isWorldIdle()) {
-                    if (idleWorlds == null)
-                        idleWorlds = new ArrayList<>();
-                    idleWorlds.add(pair.getKey());
+            try {
+                for (var pair : this.activeWorlds.entrySet()) {
+                    if (pair.getValue().isWorldIdle()) {
+                        if (idleWorlds == null)
+                            idleWorlds = new ArrayList<>();
+                        idleWorlds.add(pair.getKey());
+                    }
                 }
+            } finally {
+                this.activeWorldLock.unlockRead(stamp);
             }
-            this.activeWorldLock.unlockRead(stamp);
         }
 
         if (idleWorlds != null) {
             // Shutdown and clear all idle worlds
             long stamp = this.activeWorldLock.writeLock();
-            for (var id : idleWorlds) {
-                var world = this.activeWorlds.remove(id);
-                if (world == null)
-                    continue;// Race condition between unlock read and acquire write
-                if (!world.isWorldIdle()) {
-                    this.activeWorlds.put(id, world);
-                    continue;
-                } // No longer idle
-                Logger.info("Shutting down idle world: " + id.getLongHash());
-                // If is here close and free the world
-                world.free();
+            try {
+                for (var id : idleWorlds) {
+                    var world = this.activeWorlds.remove(id);
+                    if (world == null)
+                        continue;// Race condition between unlock read and acquire write
+                    if (!world.isWorldIdle()) {
+                        this.activeWorlds.put(id, world);
+                        continue;
+                    } // No longer idle
+                    Logger.info("Shutting down idle world: " + id.getLongHash());
+                    // If is here close and free the world
+                    world.free();
+                }
+            } finally {
+                this.activeWorldLock.unlockWrite(stamp);
             }
-            this.activeWorldLock.unlockWrite(stamp);
         }
     }
 
