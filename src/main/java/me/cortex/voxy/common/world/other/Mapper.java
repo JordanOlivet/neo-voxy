@@ -505,6 +505,7 @@ public class Mapper {
             try {
                 var serialized = new CompoundTag();
                 serialized.putInt("id", this.id);
+                serialized.putInt("DataVersion", SharedConstants.getCurrentVersion().getDataVersion().getVersion());
                 serialized.put("block_state", BlockState.CODEC.encodeStart(NbtOps.INSTANCE, this.state).result().get());
                 var out = new ByteArrayOutputStream();
                 NbtIo.writeCompressed(serialized, out);
@@ -525,14 +526,28 @@ public class Mapper {
                 if (state.isError()) {
                     Logger.info(
                             "Could not decode blockstate, attempting fixes, error: " + state.error().get().message());
-                    bsc = (CompoundTag) DataFixers.getDataFixer()
-                            .update(References.BLOCK_STATE, new Dynamic<>(NbtOps.INSTANCE, bsc), 0,
-                                    SharedConstants.getCurrentVersion().getDataVersion().getVersion())
-                            .getValue();
-                    state = BlockState.CODEC.parse(NbtOps.INSTANCE, bsc);
+                    int currentVersion = SharedConstants.getCurrentVersion().getDataVersion().getVersion();
+                    // Legacy entries written before DataVersion was stored default to the
+                    // current version, so no schema walk is attempted for them.
+                    int fromVersion = compound.contains("DataVersion") ? compound.getInt("DataVersion") : currentVersion;
+                    try {
+                        bsc = (CompoundTag) DataFixers.getDataFixer()
+                                .update(References.BLOCK_STATE, new Dynamic<>(NbtOps.INSTANCE, bsc), fromVersion,
+                                        currentVersion)
+                                .getValue();
+                        state = BlockState.CODEC.parse(NbtOps.INSTANCE, bsc);
+                    } catch (Exception fixError) {
+                        // Datafixer itself can throw (e.g. removed-mod blocks, bad source
+                        // version). Fall back to air instead of crashing chunk load.
+                        Logger.error("Datafix threw for blockstate id:" + id + ", setting to air: "
+                                + fixError.getMessage());
+                        forceResave[0] |= true;
+                        return new StateEntry(id, Blocks.AIR.defaultBlockState());
+                    }
                     if (state.isError()) {
                         Logger.error("Could not decode blockstate setting to air. id:" + id + " error: "
                                 + state.error().get().message());
+                        forceResave[0] |= true;
                         return new StateEntry(id, Blocks.AIR.defaultBlockState());
                     } else {
                         Logger.info("Fixed blockstate to: " + state.getOrThrow());
