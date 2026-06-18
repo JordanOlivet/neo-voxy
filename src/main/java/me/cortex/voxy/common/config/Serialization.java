@@ -5,6 +5,7 @@ import com.google.gson.reflect.TypeToken;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonWriter;
 import me.cortex.voxy.common.Logger;
+import me.cortex.voxy.commonImpl.VoxyCommon;
 import net.neoforged.fml.ModList;
 
 import java.io.BufferedReader;
@@ -104,6 +105,9 @@ public class Serialization {
             if (!clzName.toLowerCase().contains("config")) {
                 continue;// Only load classes that contain the word config
             }
+            if (VoxyCommon.IS_DEDICATED_SERVER && clzName.contains(".client.")) {
+                continue;// Never load client-only classes on a dedicated server (Sodium/Iris linkage)
+            }
             if (clzName.contains("mixin")) {
                 continue;// Dont want to load mixins
             }
@@ -115,6 +119,10 @@ public class Serialization {
             }
             if (clzName.endsWith("VoxyConfig")) {
                 continue;// Special case to prevent recursive loading pain
+            }
+
+            if (clzName.endsWith("VoxyOptionStorage")) {
+                continue;// Sodium OptionStorage adapter, client-only, not a config type
             }
 
             if (clzName.equals(Serialization.class.getName())) {
