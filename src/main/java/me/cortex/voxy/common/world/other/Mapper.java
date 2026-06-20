@@ -148,7 +148,12 @@ public class Mapper {
                 while (true) {
                     var state = new StateEntry(error.right(),
                             Block.BLOCK_STATE_REGISTRY.byId(rand.nextInt(Block.BLOCK_STATE_REGISTRY.size() - 1)));
-                    if (this.block2stateEntry.put(state.state, state) == null) {
+                    // putIfAbsent, NOT put: on a collision put() would evict the legitimate
+                    // winner already mapped to this state and leave this throwaway StateEntry
+                    // (whose id is never placed in blockId2stateEntry) stranded in the map.
+                    // forceResaveStates would then iterate it and fail the
+                    // blockSnap[id] == entry invariant -> "State Id NOT THE SAME". Skip and retry.
+                    if (this.block2stateEntry.putIfAbsent(state.state, state) == null) {
                         sentries.add(state);
                         break;
                     }
@@ -457,8 +462,12 @@ public class Mapper {
             if (entry.state.isAir() && entry.id == 0) {
                 continue;
             }
+            // forceResaveStates is best-effort persistence and runs on the render thread
+            // during world load. A broken id<->entry invariant must degrade gracefully:
+            // skip the offending entry instead of throwing, which would crash the join.
             if (entry.id >= blockSnap.length || blockSnap[entry.id] != entry) {
-                throw new IllegalStateException("State Id NOT THE SAME, very critically bad. entry: " + entry.id);
+                Logger.error("State Id mismatch during resave, skipping entry: " + entry.id + " (" + entry.state + ")");
+                continue;
             }
             byte[] serialized = entry.serialize();
             ByteBuffer buffer = ByteBuffer.wrap(serialized);
@@ -467,7 +476,8 @@ public class Mapper {
 
         for (var entry : biomes) {
             if (entry.id >= biomeSnap.length || biomeSnap[entry.id] != entry) {
-                throw new IllegalStateException("Biome Id NOT THE SAME, very critically bad");
+                Logger.error("Biome Id mismatch during resave, skipping entry: " + entry.id + " (" + entry.biome + ")");
+                continue;
             }
 
             byte[] serialized = entry.serialize();
