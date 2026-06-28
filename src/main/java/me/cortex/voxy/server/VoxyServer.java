@@ -1,6 +1,7 @@
 package me.cortex.voxy.server;
 
 import me.cortex.voxy.common.Logger;
+import me.cortex.voxy.common.network.SharedBandwidthLimit;
 import me.cortex.voxy.common.network.VoxyNetworkHandler;
 import me.cortex.voxy.common.network.VoxyPacketPayload;
 import me.cortex.voxy.common.world.WorldEngine;
@@ -47,6 +48,18 @@ public class VoxyServer {
 
     // Loaded at ServerStartedEvent, accessible by LodStreamingService et al.
     private static volatile VoxyServerConfig serverConfig = new VoxyServerConfig();
+
+    // One bandwidth pool shared across every dimension's streaming service. Each
+    // LodStreamingService used to new up its own SharedBandwidthLimit, so the
+    // "global" cap was silently multiplied by the number of active dimensions and
+    // config.globalLimitKBps was never honoured at all (the no-arg pool hardcodes
+    // the default). The supplier reads the live config so /voxyadmin reload (and
+    // any future hot-reload) takes effect without a restart.
+    private static final SharedBandwidthLimit GLOBAL_BANDWIDTH =
+            new SharedBandwidthLimit(() -> {
+                VoxyServerConfig c = serverConfig;
+                return c != null ? c.globalLimitKBps : SharedBandwidthLimit.DEFAULT_GLOBAL_LIMIT_KBPS;
+            });
 
     public static VoxyServerConfig getServerConfig() {
         return serverConfig;
@@ -242,7 +255,7 @@ public class VoxyServer {
         LodStreamingService service = streamingServices.computeIfAbsent(level,
                 l -> {
                     Logger.info("Creating LodStreamingService for " + level.dimension().location());
-                    return new LodStreamingService(engine, level);
+                    return new LodStreamingService(engine, level, GLOBAL_BANDWIDTH);
                 });
 
         // Actually start the sync for this player
@@ -308,7 +321,7 @@ public class VoxyServer {
         LodStreamingService service = streamingServices.computeIfAbsent(level,
                 l -> {
                     Logger.info("Creating LodStreamingService for " + level.dimension().location());
-                    return new LodStreamingService(engine, level);
+                    return new LodStreamingService(engine, level, GLOBAL_BANDWIDTH);
                 });
 
         // Forward section request to streaming service
