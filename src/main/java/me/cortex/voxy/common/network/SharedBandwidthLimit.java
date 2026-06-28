@@ -72,7 +72,7 @@ public class SharedBandwidthLimit {
 
     /**
      * Calculate bytes allowed to send per tick (50ms).
-     * 
+     *
      * @param perPlayerLimitKBps Per-player limit in KB/s
      * @return Bytes allowed this tick
      */
@@ -88,6 +88,29 @@ public class SharedBandwidthLimit {
         // KB/s * 1000 bytes/KB / 20 ticks/sec = bytes/tick
         // Add 1 to account for rounding
         return (effectiveLimit * 1000) / 20 + 1;
+    }
+
+    /**
+     * Effective per-second send allowance for a sender, in KB/s: the smaller of
+     * its per-player limit and its fair share of the (current) global pool.
+     * <p>
+     * Unlike {@link #getBytesPerTick(int)}, this returns a <em>rate</em>, not a
+     * fixed per-call budget. Callers are expected to convert it into send tokens
+     * based on actual elapsed wall-clock time (a token bucket), which is what
+     * keeps the limit honest when the sender is ticked at an irregular cadence
+     * (e.g. an eager flush the instant a section is queued). Handing out a full
+     * per-call budget the way {@code getBytesPerTick} does lets such eager calls
+     * bypass the cap entirely.
+     *
+     * @return KB/s allowance, or {@link Integer#MAX_VALUE} when unlimited.
+     */
+    public int getEffectiveLimitKBps(int perPlayerLimitKBps) {
+        int share = getBandwidthShareKBps();
+        int effectiveLimit = Math.min(perPlayerLimitKBps, share);
+        if (effectiveLimit <= 0) {
+            return Integer.MAX_VALUE;
+        }
+        return effectiveLimit;
     }
 
     /**
