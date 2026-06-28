@@ -384,6 +384,29 @@ public class VoxyServer {
     }
 
     /**
+     * Stop streaming a player in every dimension except the one they just entered.
+     * <p>
+     * Streaming state is per-dimension and was only torn down on logout, so after
+     * an Overworld→Nether→Overworld round trip the old dimension's service kept
+     * ticking for the player — flooding the connection with that dimension's LODs
+     * and leaking them into the world the player is actually in. The client
+     * re-issues a sync request on dimension change, so the destination dimension
+     * restarts on its own.
+     */
+    @SubscribeEvent
+    public static void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)) {
+            return;
+        }
+        ServerLevel current = player.serverLevel();
+        for (var entry : streamingServices.entrySet()) {
+            if (entry.getKey() != current) {
+                entry.getValue().stopStreamingForPlayer(player.getUUID());
+            }
+        }
+    }
+
+    /**
      * Handle server tick for command processing.
      */
     @SubscribeEvent

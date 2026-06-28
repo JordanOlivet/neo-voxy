@@ -870,6 +870,33 @@ public class LodStreamingService implements AutoCloseable {
         VoxyNetworkHandler.removePlayer(playerId);
     }
 
+    /**
+     * Stop streaming a player in <i>this</i> dimension without tearing down their
+     * network registration — used when the player changes dimension.
+     * <p>
+     * Without this, the old dimension's per-player tick and dirty fast-push keep
+     * running for a player who is no longer here: they re-stream this dimension's
+     * sections onto the connection (and trigger a full "jumped N sections"
+     * resync), which both wastes bandwidth and leaks stale-dimension LODs into the
+     * world the player is now in (e.g. Nether LODs showing up in the Overworld
+     * after a round trip). The client re-issues a sync request on dimension change
+     * ({@code LodReceptionService}), so returning to this dimension restarts the
+     * stream cleanly. The bloom filter is persisted so the return re-streams only
+     * deltas.
+     */
+    public void stopStreamingForPlayer(UUID playerId) {
+        PlayerStreamingState state = playerStates.remove(playerId);
+        if (state != null) {
+            if (state.clientCacheFilter != null) {
+                savePlayerCacheAsync(playerId, state.clientCacheFilter);
+            }
+            cancel(state);
+            state.close();
+            Logger.info("[VoxyStream] stopped streaming for " + playerId +
+                    " (left dimension " + level.dimension().location() + ")");
+        }
+    }
+
     private void cancel(PlayerStreamingState state) {
         if (state.scheduledHandle != null) {
             state.scheduledHandle.cancel(false);
