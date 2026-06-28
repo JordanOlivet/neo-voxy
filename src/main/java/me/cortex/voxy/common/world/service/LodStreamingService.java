@@ -58,6 +58,7 @@ public class LodStreamingService implements AutoCloseable {
     private final ConcurrentHashMap<UUID, PlayerStreamingState> playerStates = new ConcurrentHashMap<>();
 
     private final ScheduledExecutorService scheduler;
+    private final ScheduledExecutorService autoRegenScheduler;
     private final ExecutorService serializeExecutor;
     private final AtomicBoolean isActive = new AtomicBoolean(true);
 
@@ -106,6 +107,16 @@ public class LodStreamingService implements AutoCloseable {
             return t;
         });
 
+        // The periodic auto-regen sweep walks thousands of loaded chunks and can
+        // take a while; keep it off the per-player tick scheduler so it can never
+        // stall player streaming (it ran on the same single thread before, which
+        // contributed to the "scheduler stalled" warnings).
+        this.autoRegenScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "VoxyAutoRegen-" + level.dimension().location().getPath());
+            t.setDaemon(true);
+            return t;
+        });
+
         int workers = Math.max(1, config.effectiveSerializeThreads());
         AtomicInteger threadIdx = new AtomicInteger();
         this.serializeExecutor = Executors.newFixedThreadPool(workers, r -> {
@@ -137,7 +148,7 @@ public class LodStreamingService implements AutoCloseable {
         if (config.autoRegenIntervalSeconds <= 0) {
             return;
         }
-        scheduler.scheduleAtFixedRate(
+        autoRegenScheduler.scheduleAtFixedRate(
                 this::autoRegenSweep,
                 config.autoRegenIntervalSeconds,
                 config.autoRegenIntervalSeconds,
@@ -568,19 +579,33 @@ public class LodStreamingService implements AutoCloseable {
 
             int radius = effectiveRadius(state);
 
-            // 1. Drain recently-dirty sections near this player
-            int dirtyFlushed = drainDirtyNear(state, px, pz, radius);
+            // Bound the heavy part of the tick (dirty drain + ring expansion) by a
+            // wall-clock budget so one tick can't monopolise the shared
+            // per-dimension scheduler thread during a resync burst — the cause of
+            // the "scheduler stalled" warnings. Work left undone resumes next tick.
+            long tickDeadlineNanos = System.nanoTime()
+                    + Math.max(1L, config.maxTickProcessingMillis) * 1_000_000L;
 
-            // 2. Expand the current ring
-            int sectionsFound = streamRing(state, px, pz, state.currentRing, radius);
+            // 1. Drain recently-dirty sections near this player
+            int dirtyFlushed = drainDirtyNear(state, px, pz, radius, tickDeadlineNanos);
+
+            // 2. Expand the current ring — only while we still have budget. If we
+            // run out mid-ring we leave currentRing put and re-run it next tick;
+            // already-sent sections short-circuit on the version check, so the
+            // retry is cheap.
+            boolean hadBudgetForRing = System.nanoTime() < tickDeadlineNanos;
+            int sectionsFound = hadBudgetForRing
+                    ? streamRing(state, px, pz, state.currentRing, radius, tickDeadlineNanos)
+                    : 0;
+            boolean ringComplete = hadBudgetForRing && System.nanoTime() < tickDeadlineNanos;
 
             if (sectionsFound > 0 || dirtyFlushed > 0) {
                 state.consecutiveEmptyRings = 0;
-            } else if (state.currentRing >= radius) {
+            } else if (ringComplete && state.currentRing >= radius) {
                 state.consecutiveEmptyRings++;
             }
 
-            if (state.currentRing < radius) {
+            if (ringComplete && state.currentRing < radius) {
                 state.currentRing++;
             }
 
@@ -648,14 +673,21 @@ public class LodStreamingService implements AutoCloseable {
         return Math.max(1, cap);
     }
 
-    private int drainDirtyNear(PlayerStreamingState state, int px, int pz, int radius) {
+    private int drainDirtyNear(PlayerStreamingState state, int px, int pz, int radius, long deadlineNanos) {
         List<Long> snap = snapshotDirty();
         if (snap.isEmpty()) {
             return 0;
         }
         int flushed = 0;
         int outOfRange = 0;
-        for (Long key : snap) {
+        int i = 0;
+        for (; i < snap.size(); i++) {
+            // Honour the per-tick budget. nanoTime is cheap but not free, so only
+            // sample it every 64 keys; anything left over is re-queued below.
+            if ((i & 0x3F) == 0 && System.nanoTime() > deadlineNanos) {
+                break;
+            }
+            long key = snap.get(i);
             // LOD-N section coords are in LOD-N's own scale; lift the player
             // coords + radius into the same scale before doing the chebyshev
             // check. Without this LOD-1+ keys at the player's actual location
@@ -677,15 +709,41 @@ public class LodStreamingService implements AutoCloseable {
                 flushed++;
             }
         }
+        // Anything we didn't reach this tick goes back on the queue so it isn't
+        // dropped; the next tick resumes from there.
+        if (i < snap.size()) {
+            requeueDirty(snap.subList(i, snap.size()));
+        }
         if (config.isLogDirtyDrainEffective() && (snap.size() >= 64 || flushed > 0)) {
             Logger.info("[VoxyStream] " + state.player.getName().getString() +
-                    " drained " + snap.size() + " dirty keys @ section(" + px + "," + pz +
+                    " drained " + i + "/" + snap.size() + " dirty keys @ section(" + px + "," + pz +
                     ") r=" + radius + " → flushed=" + flushed + " out-of-range=" + outOfRange);
         }
         return flushed;
     }
 
-    private int streamRing(PlayerStreamingState state, int px, int pz, int ring, int radius) {
+    /**
+     * Return dirty keys we couldn't process this tick to the front of the queue
+     * so the next tick resumes where we left off (FIFO order preserved). If
+     * re-adding overflows the cap, drop from the back (newest) — those keys get
+     * re-marked dirty by the next ingest / version bump anyway.
+     */
+    private void requeueDirty(List<Long> keys) {
+        if (keys.isEmpty()) {
+            return;
+        }
+        synchronized (dirtyLock) {
+            for (int j = keys.size() - 1; j >= 0; j--) {
+                recentlyDirtyKeys.addFirst(keys.get(j));
+            }
+            int cap = Math.max(256, config.dirtyQueueMaxEntries);
+            while (recentlyDirtyKeys.size() > cap) {
+                recentlyDirtyKeys.pollLast();
+            }
+        }
+    }
+
+    private int streamRing(PlayerStreamingState state, int px, int pz, int ring, int radius, long deadlineNanos) {
         if (ring > radius) {
             return 0;
         }
@@ -699,6 +757,12 @@ public class LodStreamingService implements AutoCloseable {
             for (int dz = -ring; dz <= ring; dz++) {
                 if (ring > 0 && Math.abs(dx) != ring && Math.abs(dz) != ring) {
                     continue;
+                }
+                // Out of per-tick budget: bail. tickPlayer detects this (still past
+                // the deadline on return) and re-runs the same ring next tick, so
+                // no perimeter coord is skipped.
+                if (System.nanoTime() > deadlineNanos) {
+                    return found;
                 }
                 int sectionX = px + dx;
                 int sectionZ = pz + dz;
@@ -1043,6 +1107,15 @@ public class LodStreamingService implements AutoCloseable {
         try {
             if (!scheduler.awaitTermination(1, TimeUnit.SECONDS)) {
                 Logger.warn("scheduler did not terminate within 1s on close()");
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+
+        autoRegenScheduler.shutdownNow();
+        try {
+            if (!autoRegenScheduler.awaitTermination(1, TimeUnit.SECONDS)) {
+                Logger.warn("autoRegenScheduler did not terminate within 1s on close()");
             }
         } catch (InterruptedException ignored) {
             Thread.currentThread().interrupt();

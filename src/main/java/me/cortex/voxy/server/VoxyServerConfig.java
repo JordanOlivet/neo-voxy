@@ -129,6 +129,16 @@ public class VoxyServerConfig {
     public int dirtyDrainMaxPerTick = 4096;
 
     /**
+     * Soft wall-clock budget (ms) for the heavy part of a single per-player
+     * streaming tick (dirty drain + ring expansion). When exceeded, the tick
+     * stops early and resumes on the next tick instead of monopolising the shared
+     * per-dimension scheduler thread — which is what produced the
+     * {@code scheduler stalled NNNNms} warnings during teleport resync bursts.
+     * Default 20ms.
+     */
+    public int maxTickProcessingMillis = 20;
+
+    /**
      * When {@code true}, log the wall-clock time elapsed between a section first
      * becoming dirty (chunk ingest finished) and the moment the streamer queues
      * it for transmission to a player. Useful to measure the effect of the
@@ -191,6 +201,7 @@ public class VoxyServerConfig {
             this.autoResyncOnJumpChunks = fresh.autoResyncOnJumpChunks;
             this.logVersionSkips = fresh.logVersionSkips;
             this.dirtyDrainMaxPerTick = fresh.dirtyDrainMaxPerTick;
+            this.maxTickProcessingMillis = fresh.maxTickProcessingMillis;
             this.logLatency = fresh.logLatency;
             this.logDiagFirstConnect = fresh.logDiagFirstConnect;
             this.perPlayerLimitKBps = fresh.perPlayerLimitKBps;
