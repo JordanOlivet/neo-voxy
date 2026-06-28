@@ -32,7 +32,10 @@ public class ChunkedLodSender implements AutoCloseable {
 
     private final ServerPlayer player;
     private final SharedBandwidthLimit sharedBandwidthLimit;
-    private final int perPlayerLimitKBps;
+    // Mutable so the server can lower it in response to a client congestion
+    // signal (MSG_RATE_UPDATE). Read on the synchronized tick path; volatile is
+    // enough since it's a single independent value.
+    private volatile int perPlayerLimitKBps;
 
     private final ConcurrentLinkedQueue<PendingTransfer> transferQueue = new ConcurrentLinkedQueue<>();
     private final TimerTask tickTask;
@@ -243,6 +246,15 @@ public class ChunkedLodSender implements AutoCloseable {
 
         // Update active status based on queue
         sharedBandwidthLimit.setSenderActive(this, !transferQueue.isEmpty());
+    }
+
+    /**
+     * Update the per-player rate cap (KB/s) at runtime, e.g. when the client
+     * reports a lower desired rate via congestion control. Takes effect on the
+     * next tick's token refill.
+     */
+    public void setRateLimitKBps(int kbps) {
+        this.perPlayerLimitKBps = kbps;
     }
 
     /**

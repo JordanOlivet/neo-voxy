@@ -554,8 +554,12 @@ public class LodReceptionService implements AutoCloseable {
      * Called when congestion control adjusts rate.
      */
     private void onRateUpdate() {
-        // Optionally send rate update to server
-        // congestionControl.sendRateUpdate();
+        // Forward our AIMD-derived desired rate to the server so it can ease off
+        // when our link is congested. The server treats it as a downward cap only
+        // (clamped to its own per-player limit), so this can never make the server
+        // push faster than its configured cap — it only lets a congested client
+        // ask for less.
+        congestionControl.sendRateUpdate();
     }
 
     /**

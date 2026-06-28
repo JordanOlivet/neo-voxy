@@ -48,6 +48,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class LodStreamingService implements AutoCloseable {
 
+    /** Lowest per-player rate (KB/s) a client congestion signal can throttle us to. */
+    private static final int CLIENT_RATE_FLOOR_KBPS = 64;
+
     private final WorldEngine worldEngine;
     private final ServerLevel level;
     private final VoxyServerConfig config;
@@ -379,9 +382,21 @@ public class LodStreamingService implements AutoCloseable {
     public void handleRateUpdate(ServerPlayer player, VoxyPacketPayload payload) {
         int desiredRate = payload.parseRate();
         PlayerStreamingState state = playerStates.get(player.getUUID());
-        if (state != null) {
-            state.clientDesiredRate = desiredRate;
+        if (state == null) {
+            return;
         }
+        state.clientDesiredRate = desiredRate;
+        // Honour the client's AIMD congestion signal as a *downward* cap: never
+        // push faster than the server's configured per-player limit, and never let
+        // a backed-off or misbehaving client (e.g. a negative/garbage rate) starve
+        // its own stream below a small floor. The authoritative throttle is still
+        // the server-side token bucket in ChunkedLodSender; this just lets a client
+        // whose link is congested ask us to ease off.
+        int effective = Math.min(config.perPlayerLimitKBps, desiredRate);
+        if (effective < CLIENT_RATE_FLOOR_KBPS) {
+            effective = CLIENT_RATE_FLOOR_KBPS;
+        }
+        state.sender.setRateLimitKBps(effective);
     }
 
     public void handleClientHint(ServerPlayer player, VoxyPacketPayload payload) {
