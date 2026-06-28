@@ -13,6 +13,10 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.chunk.LevelChunk;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -50,6 +54,9 @@ public class LodStreamingService implements AutoCloseable {
 
     /** Lowest per-player rate (KB/s) a client congestion signal can throttle us to. */
     private static final int CLIENT_RATE_FLOOR_KBPS = 64;
+
+    /** On-disk format version for the persisted per-client sent-version map. */
+    private static final byte VMAP_FORMAT_VERSION = 1;
 
     private final WorldEngine worldEngine;
     private final ServerLevel level;
@@ -442,7 +449,7 @@ public class LodStreamingService implements AutoCloseable {
                 " (pull mode deprecated, server-driven streaming only)");
     }
 
-    public void startSyncForPlayer(ServerPlayer player) {
+    public void startSyncForPlayer(ServerPlayer player, long cacheEpoch) {
         Logger.info("Received sync request from " + player.getName().getString());
         VoxyDiag.startWindow(60);
         VoxyDiag.event("startSyncForPlayer name=" + player.getName().getString());
@@ -463,6 +470,25 @@ public class LodStreamingService implements AutoCloseable {
         state.inMaintenance = false;
         state.lastPlayerSectionX = Integer.MIN_VALUE;
         state.lastPlayerSectionZ = Integer.MIN_VALUE;
+
+        // Restore the per-client sent-version record so a reconnect / dimension
+        // return only re-streams sections that actually changed since the client
+        // last had them, instead of the whole ring. Gated on the client's cache
+        // epoch: if it wiped its local LOD cache the epoch changes, the stored map
+        // is ignored, and we fall back to a full stream. The ring scan still runs
+        // from 0, but maybeQueueSection short-circuits up-to-date sections cheaply,
+        // so only genuine deltas get serialized and sent.
+        state.cacheEpoch = cacheEpoch;
+        if (cacheEpoch != 0L && state.lastSentVersion.isEmpty()) {
+            int restored = loadVersionMap(player.getUUID(), cacheEpoch, state.lastSentVersion);
+            if (restored > 0) {
+                Logger.info("[VoxyStream] restored " + restored + " sent-version entries for " +
+                        player.getName().getString() + " (cache epoch match) → delta-only stream");
+            } else {
+                Logger.info("[VoxyStream] no matching version cache for " +
+                        player.getName().getString() + " → full stream");
+            }
+        }
 
         BloomFilter savedFilter = loadPlayerCache(player.getUUID());
         if (savedFilter != null) {
@@ -640,6 +666,9 @@ public class LodStreamingService implements AutoCloseable {
                 long slow = Math.max(50L, (long) (1000.0 / Math.max(0.1, config.maintenanceTickHz)));
                 rescheduleTick(state, slow);
                 savePlayerCacheAsync(player.getUUID(), state.clientCacheFilter);
+                // Checkpoint the sent-version record once we've settled, so a crash
+                // or restart keeps the delta-streaming benefit on next connect.
+                saveVersionMapAsync(player.getUUID(), state.cacheEpoch, state.lastSentVersion);
                 Logger.info("Entering maintenance mode for " + player.getName().getString() +
                         " (slowTick=" + slow + "ms)");
             } else if (state.consecutiveEmptyRings < 5 && state.inMaintenance) {
@@ -928,6 +957,7 @@ public class LodStreamingService implements AutoCloseable {
             if (state.clientCacheFilter != null) {
                 savePlayerCacheAsync(playerId, state.clientCacheFilter);
             }
+            saveVersionMapAsync(playerId, state.cacheEpoch, state.lastSentVersion);
             cancel(state);
             state.close();
         }
@@ -954,6 +984,9 @@ public class LodStreamingService implements AutoCloseable {
             if (state.clientCacheFilter != null) {
                 savePlayerCacheAsync(playerId, state.clientCacheFilter);
             }
+            // Persist the sent-version record so returning to this dimension only
+            // re-streams the delta accumulated while away.
+            saveVersionMapAsync(playerId, state.cacheEpoch, state.lastSentVersion);
             cancel(state);
             state.close();
             Logger.info("[VoxyStream] stopped streaming for " + playerId +
@@ -1134,7 +1167,12 @@ public class LodStreamingService implements AutoCloseable {
             Thread.currentThread().interrupt();
         }
 
-        for (PlayerStreamingState state : playerStates.values()) {
+        for (Map.Entry<UUID, PlayerStreamingState> entry : playerStates.entrySet()) {
+            PlayerStreamingState state = entry.getValue();
+            // Synchronous save on shutdown: the serialize pool (which the async
+            // variant submits to) is already gone by here, and we want the record
+            // to survive a clean restart for delta streaming next session.
+            saveVersionMap(entry.getKey(), state.cacheEpoch, snapshotVersionMap(state.lastSentVersion));
             cancel(state);
             state.close();
         }
@@ -1201,6 +1239,99 @@ public class LodStreamingService implements AutoCloseable {
         }
     }
 
+    // ============ Per-client sent-version map persistence (delta streaming) ======== //
+
+    private Path getVersionMapDir() {
+        return Path.of("voxy_cache", "version_maps");
+    }
+
+    /**
+     * Per-(player, dimension) file. Scoped by dimension because one
+     * LodStreamingService exists per ServerLevel and they would otherwise collide
+     * on the same UUID (the bloom-filter cache has exactly this latent bug).
+     */
+    private Path versionMapFile(UUID playerId) {
+        String dim = level.dimension().location().toString().replaceAll("[^a-zA-Z0-9._-]", "_");
+        return getVersionMapDir().resolve(playerId + "_" + dim + ".vmap");
+    }
+
+    private java.util.HashMap<Long, Long> snapshotVersionMap(Map<Long, Long> map) {
+        return new java.util.HashMap<>(map);
+    }
+
+    private void saveVersionMapAsync(UUID playerId, long epoch, Map<Long, Long> map) {
+        if (epoch == 0L || map.isEmpty()) {
+            return;
+        }
+        java.util.HashMap<Long, Long> snapshot = snapshotVersionMap(map);
+        try {
+            serializeExecutor.submit(() -> saveVersionMap(playerId, epoch, snapshot));
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // Pool shut down (shutdown raced this call); the synchronous save in
+            // close() covers the shutdown path.
+        }
+    }
+
+    private void saveVersionMap(UUID playerId, long epoch, Map<Long, Long> map) {
+        if (epoch == 0L || map.isEmpty()) {
+            return;
+        }
+        try {
+            Files.createDirectories(getVersionMapDir());
+            Path file = versionMapFile(playerId);
+            try (DataOutputStream out = new DataOutputStream(
+                    new BufferedOutputStream(Files.newOutputStream(file)))) {
+                out.writeByte(VMAP_FORMAT_VERSION);
+                out.writeLong(epoch);
+                out.writeInt(map.size());
+                for (Map.Entry<Long, Long> e : map.entrySet()) {
+                    out.writeLong(e.getKey());
+                    out.writeLong(e.getValue());
+                }
+            }
+        } catch (IOException e) {
+            Logger.error("Failed to save version map for " + playerId + ": " + e.getMessage());
+        }
+    }
+
+    /**
+     * Load a persisted sent-version map into {@code into} iff the file exists and
+     * its stored epoch matches {@code expectedEpoch}. Returns the number of
+     * entries restored (0 on absence, epoch mismatch, or error → full re-stream).
+     */
+    private int loadVersionMap(UUID playerId, long expectedEpoch, Map<Long, Long> into) {
+        Path file = versionMapFile(playerId);
+        try {
+            if (!Files.exists(file)) {
+                return 0;
+            }
+            try (DataInputStream in = new DataInputStream(
+                    new BufferedInputStream(Files.newInputStream(file)))) {
+                if (in.readByte() != VMAP_FORMAT_VERSION) {
+                    return 0;
+                }
+                long epoch = in.readLong();
+                if (epoch != expectedEpoch) {
+                    return 0;
+                }
+                int count = in.readInt();
+                if (count < 0 || count > 5_000_000) {
+                    Logger.warn("Suspicious version-map entry count " + count + " for " + playerId + ", ignoring");
+                    return 0;
+                }
+                for (int i = 0; i < count; i++) {
+                    long key = in.readLong();
+                    long version = in.readLong();
+                    into.put(key, version);
+                }
+                return count;
+            }
+        } catch (IOException e) {
+            Logger.error("Failed to load version map for " + playerId + ": " + e.getMessage());
+            return 0;
+        }
+    }
+
     // ==================== Inner types ==================== //
 
     private static class PlayerStreamingState {
@@ -1215,6 +1346,9 @@ public class LodStreamingService implements AutoCloseable {
         boolean inMaintenance = false;
         int clientDesiredRate = SharedBandwidthLimit.DEFAULT_PLAYER_LIMIT_KBPS;
         int clientHintedRadius = 0; // 0 = use server default
+        // Client LOD cache nonce for this session; the persisted sent-version map
+        // is keyed by it so a wiped client cache (new epoch) invalidates our record.
+        long cacheEpoch = 0L;
         BloomFilter clientCacheFilter = null;
 
         int lastPlayerSectionX = Integer.MIN_VALUE;

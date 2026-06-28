@@ -183,7 +183,7 @@ public class LodReceptionService implements AutoCloseable {
             Logger.info("Requesting LOD sync for server-driven streaming");
             VoxyDiag.startWindow(60);
             VoxyDiag.event("syncRequested");
-            boolean sent = VoxyNetworkHandler.sendToServer(VoxyPacketPayload.syncRequest());
+            boolean sent = VoxyNetworkHandler.sendToServer(VoxyPacketPayload.syncRequest(getCacheEpoch()));
             if (!sent) {
                 Logger.warn("Initial sync request not delivered — falling back to client-local ingest");
                 localMode = true;
@@ -572,7 +572,24 @@ public class LodReceptionService implements AutoCloseable {
         }
 
         Logger.info("Requesting LOD sync from server...");
-        VoxyNetworkHandler.sendToServer(VoxyPacketPayload.syncRequest());
+        VoxyNetworkHandler.sendToServer(VoxyPacketPayload.syncRequest(getCacheEpoch()));
+    }
+
+    /**
+     * Resolve the local LOD cache epoch from the client Voxy instance, sent to the
+     * server so it can do delta-only streaming when our cache is still intact.
+     * Returns 0 (= full stream) if the instance isn't a client instance yet.
+     */
+    private long getCacheEpoch() {
+        try {
+            var inst = me.cortex.voxy.commonImpl.VoxyCommon.getInstance();
+            if (inst instanceof me.cortex.voxy.client.VoxyClientInstance ci) {
+                return ci.getOrCreateCacheEpoch();
+            }
+        } catch (Throwable t) {
+            Logger.warn("Failed to resolve LOD cache epoch: " + t.getMessage());
+        }
+        return 0L;
     }
 
     /**

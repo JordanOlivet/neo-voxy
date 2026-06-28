@@ -210,7 +210,7 @@ public class VoxyServer {
      */
     private static void handleClientMessage(ServerPlayer player, VoxyPacketPayload payload) {
         switch (payload.messageType()) {
-            case VoxyPacketPayload.MSG_SYNC_REQUEST -> handleSyncRequest(player);
+            case VoxyPacketPayload.MSG_SYNC_REQUEST -> handleSyncRequest(player, payload);
             case VoxyPacketPayload.MSG_CACHE_RESPONSE -> handleCacheResponse(player, payload);
             case VoxyPacketPayload.MSG_RATE_UPDATE -> handleRateUpdate(player, payload);
             case VoxyPacketPayload.MSG_REQUEST_SECTIONS -> handleSectionRequest(player, payload);
@@ -221,8 +221,10 @@ public class VoxyServer {
     /**
      * Handle sync request from a player.
      */
-    private static void handleSyncRequest(ServerPlayer player) {
-        Logger.info("Received sync request from " + player.getName().getString());
+    private static void handleSyncRequest(ServerPlayer player, VoxyPacketPayload payload) {
+        long cacheEpoch = payload.parseSyncCacheEpoch();
+        Logger.info("Received sync request from " + player.getName().getString() +
+                " (cacheEpoch=" + cacheEpoch + ")");
 
         ServerLevel level = player.serverLevel();
         WorldIdentifier worldId = WorldIdentifier.of(level);
@@ -259,7 +261,7 @@ public class VoxyServer {
                 });
 
         // Actually start the sync for this player
-        service.startSyncForPlayer(player);
+        service.startSyncForPlayer(player, cacheEpoch);
         Logger.info(
                 "LOD streaming started for " + player.getName().getString() + " in " + level.dimension().location());
     }
@@ -578,8 +580,10 @@ public class VoxyServer {
      * Broadcast sync request to all players in a level.
      */
     public static void broadcastSync(ServerLevel level) {
+        // Server-initiated: no client cache epoch available, so epoch 0 → full
+        // re-stream. This is an explicit admin refresh, so that's the intent.
         for (ServerPlayer player : level.players()) {
-            handleSyncRequest(player);
+            handleSyncRequest(player, VoxyPacketPayload.syncRequest());
         }
     }
 }
