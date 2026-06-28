@@ -34,6 +34,25 @@ src/main/java/me/cortex/voxy/
 - **Iris** (NeoForge) : `1.8.0+1.21.1-neoforge` - optionnel (pour les shaders), `modCompileOnly` au build
 - **Lithium** (NeoForge) : `0.15.0` - optionnel
 
+## Setup initial (nouveau clone)
+
+Le dossier `libs/` est gitignore : un clone neuf n'a ni le jar Chunky NeoForge
+(requis pour compiler le mixin Chunky) ni les JarJars Sodium (requis au runtime).
+Un script bootstrappe tout (Chunky, JarJars Sodium, et un JDK 21 si absent) :
+
+```bash
+# Linux / macOS / Git Bash sous Windows
+scripts/setup-dev.sh            # provisionne + ./gradlew genSources
+scripts/setup-dev.sh --quick    # provisionne + compileJava seulement
+scripts/setup-dev.sh --no-build # provisionne uniquement
+
+# Windows (PowerShell natif)
+powershell -ExecutionPolicy Bypass -File scripts\setup-dev.ps1
+```
+
+Le toolchain Java 21 est auto-provisionne par Gradle (resolver foojay dans
+`settings.gradle`) si aucun JDK 21 n'est detecte.
+
 ## Commandes de build
 
 ```bash
