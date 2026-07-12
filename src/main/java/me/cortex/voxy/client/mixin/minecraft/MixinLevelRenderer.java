@@ -28,8 +28,10 @@ public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
 
     @Override
     public VoxyRenderSystem getVoxyRenderSystem() {
-        // Lazily try to create renderer if it was deferred due to null player
-        if (this.renderer == null && this.level != null) {
+        // Lazily try to create renderer if it was deferred due to null player.
+        // Skip entirely when rendering is disabled: otherwise this runs every
+        // frame and floods the log with "Not creating renderer due to disabled".
+        if (this.renderer == null && this.level != null && VoxyConfig.CONFIG.isRenderingEnabled()) {
             this.createRenderer();
         }
         return this.renderer;
