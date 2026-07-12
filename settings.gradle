@@ -11,3 +11,10 @@ pluginManagement {
         gradlePluginPortal()
     }
 }
+
+// Auto-provision the Java 21 toolchain (downloads a JDK if none is detected),
+// so the build works on a machine that only has an older/launcher JVM. See
+// scripts/setup-dev.sh.
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.8.0'
+}

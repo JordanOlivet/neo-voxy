@@ -37,6 +37,33 @@ class VoxyPacketPayloadTest {
     }
 
     @Test
+    void syncRequestCacheEpochRoundTrip() {
+        VoxyPacketPayload p = VoxyPacketPayload.syncRequest(0x0123456789ABCDEFL);
+        assertEquals(VoxyPacketPayload.MSG_SYNC_REQUEST, p.messageType());
+        assertEquals(0x0123456789ABCDEFL, p.parseSyncCacheEpoch());
+    }
+
+    @Test
+    void syncRequestCacheEpochPreservesNegativeValues() {
+        VoxyPacketPayload p = VoxyPacketPayload.syncRequest(-1L);
+        assertEquals(-1L, p.parseSyncCacheEpoch());
+    }
+
+    @Test
+    void syncRequestNoArgIsEpochZero() {
+        // Backward compat: empty/legacy sync request parses as epoch 0 (full stream).
+        assertEquals(0L, VoxyPacketPayload.syncRequest().parseSyncCacheEpoch());
+        VoxyPacketPayload legacy = new VoxyPacketPayload(VoxyPacketPayload.MSG_SYNC_REQUEST, new byte[0]);
+        assertEquals(0L, legacy.parseSyncCacheEpoch());
+    }
+
+    @Test
+    void parseSyncCacheEpochRejectsWrongMessageType() {
+        VoxyPacketPayload wrong = new VoxyPacketPayload(VoxyPacketPayload.MSG_LOD_SECTION, new byte[8]);
+        assertEquals(0L, wrong.parseSyncCacheEpoch());
+    }
+
+    @Test
     void requestSectionsEmptyArrayRoundTrip() {
         VoxyPacketPayload p = VoxyPacketPayload.requestSections(new long[0]);
         assertEquals(VoxyPacketPayload.MSG_REQUEST_SECTIONS, p.messageType());

@@ -32,11 +32,20 @@ public class ChunkedLodSender implements AutoCloseable {
 
     private final ServerPlayer player;
     private final SharedBandwidthLimit sharedBandwidthLimit;
-    private final int perPlayerLimitKBps;
+    // Mutable so the server can lower it in response to a client congestion
+    // signal (MSG_RATE_UPDATE). Read on the synchronized tick path; volatile is
+    // enough since it's a single independent value.
+    private volatile int perPlayerLimitKBps;
 
     private final ConcurrentLinkedQueue<PendingTransfer> transferQueue = new ConcurrentLinkedQueue<>();
     private final TimerTask tickTask;
     private final AtomicBoolean isActive = new AtomicBoolean(true);
+
+    // Time-based token bucket (guarded by the synchronized tick()). tokenBytes is
+    // the accumulated send allowance; lastRefillNanos is the wall-clock anchor we
+    // refill against. 0 = not yet initialised.
+    private double tokenBytes = 0;
+    private long lastRefillNanos = 0L;
 
     // Stats
     private long totalBytesSent = 0;
@@ -106,9 +115,43 @@ public class ChunkedLodSender implements AutoCloseable {
             return;
         }
 
-        // Calculate bytes we can send this tick
-        int bytesRemaining = sharedBandwidthLimit.getBytesPerTick(perPlayerLimitKBps);
+        // Refill the token bucket from elapsed wall-clock time. getEffectiveLimitKBps
+        // is a *rate* (KB/s), not a per-call budget: an eager tick fired 1ms after
+        // the previous one only earns ~1ms of tokens, so it cannot be used to flood
+        // the link. (The old getBytesPerTick handed out a full fresh budget on every
+        // call — combined with the eager tick in queueSection that effectively
+        // disabled the cap, which is what produced the multi-MB/s LOD flood.)
+        int limitKBps = sharedBandwidthLimit.getEffectiveLimitKBps(perPlayerLimitKBps);
+        boolean unlimited = (limitKBps <= 0 || limitKBps == Integer.MAX_VALUE);
 
+        long bytesRemaining;
+        if (unlimited) {
+            bytesRemaining = Long.MAX_VALUE;
+        } else {
+            long now = System.nanoTime();
+            if (lastRefillNanos == 0L) {
+                lastRefillNanos = now;
+            }
+            long elapsedNanos = now - lastRefillNanos;
+            if (elapsedNanos < 0L) {
+                elapsedNanos = 0L;
+            }
+            lastRefillNanos = now;
+
+            double bytesPerSec = (double) limitKBps * 1000.0;
+            tokenBytes += bytesPerSec * (elapsedNanos / 1_000_000_000.0);
+
+            // Cap accumulated tokens so an idle stream can't bank a giant burst that
+            // re-floods the connection the instant work resumes. ~2 ticks (100ms) of
+            // allowance keeps first-byte latency low without bursting.
+            double burstCap = bytesPerSec * 2.0 / TICK_RATE;
+            if (tokenBytes > burstCap) {
+                tokenBytes = burstCap;
+            }
+            bytesRemaining = (long) tokenBytes;
+        }
+
+        long consumed = 0L;
         while (bytesRemaining > 0) {
             PendingTransfer transfer = transferQueue.peek();
             if (transfer == null) {
@@ -128,6 +171,7 @@ public class ChunkedLodSender implements AutoCloseable {
                 transfer.buffer.readBytes(sectionData);
                 VoxyNetworkHandler.sendToPlayer(player, VoxyPacketPayload.section(sectionData));
                 bytesRemaining -= dataRemaining;
+                consumed += dataRemaining;
                 totalBytesSent += dataRemaining;
                 transferQueue.poll();
                 sectionsCompleted++;
@@ -142,7 +186,7 @@ public class ChunkedLodSender implements AutoCloseable {
             }
 
             // Calculate chunk size (min of remaining bytes, CHUNK_SIZE, and remaining data)
-            int chunkSize = Math.min(Math.min(bytesRemaining, CHUNK_SIZE), dataRemaining);
+            int chunkSize = (int) Math.min(Math.min(bytesRemaining, (long) CHUNK_SIZE), (long) dataRemaining);
 
             if (chunkSize <= 0) {
                 break;
@@ -173,6 +217,7 @@ public class ChunkedLodSender implements AutoCloseable {
             VoxyNetworkHandler.sendToPlayer(player, VoxyPacketPayload.chunk(chunkData));
 
             bytesRemaining -= chunkSize;
+            consumed += chunkSize;
             totalBytesSent += chunkSize;
 
             // Check if transfer is complete
@@ -190,8 +235,26 @@ public class ChunkedLodSender implements AutoCloseable {
             }
         }
 
+        // Deduct what we actually sent from the bucket so unused allowance carries
+        // to the next tick (up to the burst cap) instead of being lost or doubled.
+        if (!unlimited) {
+            tokenBytes -= consumed;
+            if (tokenBytes < 0) {
+                tokenBytes = 0;
+            }
+        }
+
         // Update active status based on queue
         sharedBandwidthLimit.setSenderActive(this, !transferQueue.isEmpty());
+    }
+
+    /**
+     * Update the per-player rate cap (KB/s) at runtime, e.g. when the client
+     * reports a lower desired rate via congestion control. Takes effect on the
+     * next tick's token refill.
+     */
+    public void setRateLimitKBps(int kbps) {
+        this.perPlayerLimitKBps = kbps;
     }
 
     /**

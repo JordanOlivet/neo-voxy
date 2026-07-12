@@ -1,0 +1,4 @@
+# Shell scripts must stay LF or bash (incl. Git Bash) breaks on the CR.
+*.sh text eol=lf
+# Gradle wrapper script is POSIX sh too.
+gradlew text eol=lf

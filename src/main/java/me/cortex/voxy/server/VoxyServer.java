@@ -1,6 +1,7 @@
 package me.cortex.voxy.server;
 
 import me.cortex.voxy.common.Logger;
+import me.cortex.voxy.common.network.SharedBandwidthLimit;
 import me.cortex.voxy.common.network.VoxyNetworkHandler;
 import me.cortex.voxy.common.network.VoxyPacketPayload;
 import me.cortex.voxy.common.world.WorldEngine;
@@ -47,6 +48,18 @@ public class VoxyServer {
 
     // Loaded at ServerStartedEvent, accessible by LodStreamingService et al.
     private static volatile VoxyServerConfig serverConfig = new VoxyServerConfig();
+
+    // One bandwidth pool shared across every dimension's streaming service. Each
+    // LodStreamingService used to new up its own SharedBandwidthLimit, so the
+    // "global" cap was silently multiplied by the number of active dimensions and
+    // config.globalLimitKBps was never honoured at all (the no-arg pool hardcodes
+    // the default). The supplier reads the live config so /voxyadmin reload (and
+    // any future hot-reload) takes effect without a restart.
+    private static final SharedBandwidthLimit GLOBAL_BANDWIDTH =
+            new SharedBandwidthLimit(() -> {
+                VoxyServerConfig c = serverConfig;
+                return c != null ? c.globalLimitKBps : SharedBandwidthLimit.DEFAULT_GLOBAL_LIMIT_KBPS;
+            });
 
     public static VoxyServerConfig getServerConfig() {
         return serverConfig;
@@ -197,7 +210,7 @@ public class VoxyServer {
      */
     private static void handleClientMessage(ServerPlayer player, VoxyPacketPayload payload) {
         switch (payload.messageType()) {
-            case VoxyPacketPayload.MSG_SYNC_REQUEST -> handleSyncRequest(player);
+            case VoxyPacketPayload.MSG_SYNC_REQUEST -> handleSyncRequest(player, payload);
             case VoxyPacketPayload.MSG_CACHE_RESPONSE -> handleCacheResponse(player, payload);
             case VoxyPacketPayload.MSG_RATE_UPDATE -> handleRateUpdate(player, payload);
             case VoxyPacketPayload.MSG_REQUEST_SECTIONS -> handleSectionRequest(player, payload);
@@ -208,8 +221,10 @@ public class VoxyServer {
     /**
      * Handle sync request from a player.
      */
-    private static void handleSyncRequest(ServerPlayer player) {
-        Logger.info("Received sync request from " + player.getName().getString());
+    private static void handleSyncRequest(ServerPlayer player, VoxyPacketPayload payload) {
+        long cacheEpoch = payload.parseSyncCacheEpoch();
+        Logger.info("Received sync request from " + player.getName().getString() +
+                " (cacheEpoch=" + cacheEpoch + ")");
 
         ServerLevel level = player.serverLevel();
         WorldIdentifier worldId = WorldIdentifier.of(level);
@@ -242,11 +257,11 @@ public class VoxyServer {
         LodStreamingService service = streamingServices.computeIfAbsent(level,
                 l -> {
                     Logger.info("Creating LodStreamingService for " + level.dimension().location());
-                    return new LodStreamingService(engine, level);
+                    return new LodStreamingService(engine, level, GLOBAL_BANDWIDTH);
                 });
 
         // Actually start the sync for this player
-        service.startSyncForPlayer(player);
+        service.startSyncForPlayer(player, cacheEpoch);
         Logger.info(
                 "LOD streaming started for " + player.getName().getString() + " in " + level.dimension().location());
     }
@@ -308,7 +323,7 @@ public class VoxyServer {
         LodStreamingService service = streamingServices.computeIfAbsent(level,
                 l -> {
                     Logger.info("Creating LodStreamingService for " + level.dimension().location());
-                    return new LodStreamingService(engine, level);
+                    return new LodStreamingService(engine, level, GLOBAL_BANDWIDTH);
                 });
 
         // Forward section request to streaming service
@@ -367,6 +382,29 @@ public class VoxyServer {
                 service.onPlayerDisconnect(player.getUUID());
             }
             VoxyNetworkHandler.removePlayer(player.getUUID());
+        }
+    }
+
+    /**
+     * Stop streaming a player in every dimension except the one they just entered.
+     * <p>
+     * Streaming state is per-dimension and was only torn down on logout, so after
+     * an Overworld→Nether→Overworld round trip the old dimension's service kept
+     * ticking for the player — flooding the connection with that dimension's LODs
+     * and leaking them into the world the player is actually in. The client
+     * re-issues a sync request on dimension change, so the destination dimension
+     * restarts on its own.
+     */
+    @SubscribeEvent
+    public static void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)) {
+            return;
+        }
+        ServerLevel current = player.serverLevel();
+        for (var entry : streamingServices.entrySet()) {
+            if (entry.getKey() != current) {
+                entry.getValue().stopStreamingForPlayer(player.getUUID());
+            }
         }
     }
 
@@ -542,8 +580,10 @@ public class VoxyServer {
      * Broadcast sync request to all players in a level.
      */
     public static void broadcastSync(ServerLevel level) {
+        // Server-initiated: no client cache epoch available, so epoch 0 → full
+        // re-stream. This is an explicit admin refresh, so that's the intent.
         for (ServerPlayer player : level.players()) {
-            handleSyncRequest(player);
+            handleSyncRequest(player, VoxyPacketPayload.syncRequest());
         }
     }
 }

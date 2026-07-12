@@ -26,8 +26,17 @@ public class ClientCongestionControl {
     /** Minimum rate to maintain even under heavy congestion */
     private static final double MIN_RATE = 1000; // 1 KB/s
 
+    /**
+     * Rate to start (and reset) at, in bytes/s. Starting high means we probe
+     * downward only when the link is actually congested, rather than slow-ramping
+     * up from near-zero on every connect — which would make LODs trickle in for
+     * ~20s after joining. The server clamps whatever we ask for to its own
+     * per-player cap, so a generous start is safe.
+     */
+    private static final double INITIAL_RATE = 1_048_576; // 1 MB/s
+
     private final AtomicLong bytesReceived = new AtomicLong(0);
-    private double desiredRate = ADDITIVE_INCREASE;
+    private double desiredRate = INITIAL_RATE;
     private long lastAdjustTime = System.currentTimeMillis();
     private final Runnable rateUpdateHandler;
 
@@ -50,7 +59,7 @@ public class ClientCongestionControl {
      * Reset to initial state (e.g., on connect).
      */
     public void reset() {
-        desiredRate = ADDITIVE_INCREASE;
+        desiredRate = INITIAL_RATE;
         lastAdjustTime = System.currentTimeMillis();
         bytesReceived.set(0);
     }

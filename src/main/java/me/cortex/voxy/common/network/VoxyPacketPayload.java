@@ -93,10 +93,41 @@ public record VoxyPacketPayload(byte messageType, byte[] data) implements Custom
     }
 
     /**
-     * Helper to create a sync request payload.
+     * Helper to create a sync request payload carrying the client's local LOD
+     * cache epoch (a nonce identifying the client's persisted cache). The server
+     * only restores its per-client sent-version record when this matches the
+     * epoch it last saw — so wiping the client cache (new epoch) forces a clean
+     * full re-stream.
+     */
+    public static VoxyPacketPayload syncRequest(long cacheEpoch) {
+        byte[] data = new byte[8];
+        for (int i = 0; i < 8; i++) {
+            data[i] = (byte) (cacheEpoch >>> (56 - i * 8));
+        }
+        return new VoxyPacketPayload(MSG_SYNC_REQUEST, data);
+    }
+
+    /**
+     * Helper to create a sync request payload with no cache epoch (epoch 0 = the
+     * server treats it as "no usable client cache" and does a full stream).
      */
     public static VoxyPacketPayload syncRequest() {
-        return new VoxyPacketPayload(MSG_SYNC_REQUEST, new byte[0]);
+        return syncRequest(0L);
+    }
+
+    /**
+     * Parse the client cache epoch from a sync-request payload. Returns 0 when
+     * absent (e.g. an older client that sent an empty payload).
+     */
+    public long parseSyncCacheEpoch() {
+        if (messageType != MSG_SYNC_REQUEST || data.length < 8) {
+            return 0L;
+        }
+        long v = 0L;
+        for (int i = 0; i < 8; i++) {
+            v = (v << 8) | (data[i] & 0xFFL);
+        }
+        return v;
     }
 
     /**

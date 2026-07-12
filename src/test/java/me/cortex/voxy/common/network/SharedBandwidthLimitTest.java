@@ -100,6 +100,48 @@ class SharedBandwidthLimitTest {
     }
 
     @Test
+    void effectiveLimitRespectsPerPlayerCap() {
+        SharedBandwidthLimit limit = new SharedBandwidthLimit(() -> 10_000);
+        Object a = new Object();
+        limit.setSenderActive(a, true);
+        assertEquals(100, limit.getEffectiveLimitKBps(100));
+    }
+
+    @Test
+    void effectiveLimitRespectsShareWhenLower() {
+        SharedBandwidthLimit limit = new SharedBandwidthLimit(() -> 200);
+        Object a = new Object();
+        Object b = new Object();
+        limit.setSenderActive(a, true);
+        limit.setSenderActive(b, true);
+        assertEquals(100, limit.getEffectiveLimitKBps(1000));
+    }
+
+    @Test
+    void effectiveLimitAppliesPerPlayerCapEvenWhenGlobalUnlimited() {
+        SharedBandwidthLimit limit = new SharedBandwidthLimit(() -> 0);
+        Object a = new Object();
+        limit.setSenderActive(a, true);
+        assertEquals(1000, limit.getEffectiveLimitKBps(1000));
+    }
+
+    @Test
+    void effectiveLimitUnlimitedWhenBothUnbounded() {
+        SharedBandwidthLimit limit = new SharedBandwidthLimit(() -> 0);
+        Object a = new Object();
+        limit.setSenderActive(a, true);
+        assertEquals(Integer.MAX_VALUE, limit.getEffectiveLimitKBps(0));
+    }
+
+    @Test
+    void effectiveLimitUnlimitedWhenPerPlayerZero() {
+        SharedBandwidthLimit limit = new SharedBandwidthLimit(() -> 1000);
+        Object a = new Object();
+        limit.setSenderActive(a, true);
+        assertEquals(Integer.MAX_VALUE, limit.getEffectiveLimitKBps(0));
+    }
+
+    @Test
     void defaultConstructorUsesConstantLimit() {
         SharedBandwidthLimit limit = new SharedBandwidthLimit();
         Object a = new Object();

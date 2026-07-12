@@ -13,6 +13,10 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.chunk.LevelChunk;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -48,6 +52,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class LodStreamingService implements AutoCloseable {
 
+    /** Lowest per-player rate (KB/s) a client congestion signal can throttle us to. */
+    private static final int CLIENT_RATE_FLOOR_KBPS = 64;
+
+    /** On-disk format version for the persisted per-client sent-version map. */
+    private static final byte VMAP_FORMAT_VERSION = 1;
+
     private final WorldEngine worldEngine;
     private final ServerLevel level;
     private final VoxyServerConfig config;
@@ -55,6 +65,7 @@ public class LodStreamingService implements AutoCloseable {
     private final ConcurrentHashMap<UUID, PlayerStreamingState> playerStates = new ConcurrentHashMap<>();
 
     private final ScheduledExecutorService scheduler;
+    private final ScheduledExecutorService autoRegenScheduler;
     private final ExecutorService serializeExecutor;
     private final AtomicBoolean isActive = new AtomicBoolean(true);
 
@@ -103,6 +114,16 @@ public class LodStreamingService implements AutoCloseable {
             return t;
         });
 
+        // The periodic auto-regen sweep walks thousands of loaded chunks and can
+        // take a while; keep it off the per-player tick scheduler so it can never
+        // stall player streaming (it ran on the same single thread before, which
+        // contributed to the "scheduler stalled" warnings).
+        this.autoRegenScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "VoxyAutoRegen-" + level.dimension().location().getPath());
+            t.setDaemon(true);
+            return t;
+        });
+
         int workers = Math.max(1, config.effectiveSerializeThreads());
         AtomicInteger threadIdx = new AtomicInteger();
         this.serializeExecutor = Executors.newFixedThreadPool(workers, r -> {
@@ -134,7 +155,7 @@ public class LodStreamingService implements AutoCloseable {
         if (config.autoRegenIntervalSeconds <= 0) {
             return;
         }
-        scheduler.scheduleAtFixedRate(
+        autoRegenScheduler.scheduleAtFixedRate(
                 this::autoRegenSweep,
                 config.autoRegenIntervalSeconds,
                 config.autoRegenIntervalSeconds,
@@ -379,9 +400,21 @@ public class LodStreamingService implements AutoCloseable {
     public void handleRateUpdate(ServerPlayer player, VoxyPacketPayload payload) {
         int desiredRate = payload.parseRate();
         PlayerStreamingState state = playerStates.get(player.getUUID());
-        if (state != null) {
-            state.clientDesiredRate = desiredRate;
+        if (state == null) {
+            return;
         }
+        state.clientDesiredRate = desiredRate;
+        // Honour the client's AIMD congestion signal as a *downward* cap: never
+        // push faster than the server's configured per-player limit, and never let
+        // a backed-off or misbehaving client (e.g. a negative/garbage rate) starve
+        // its own stream below a small floor. The authoritative throttle is still
+        // the server-side token bucket in ChunkedLodSender; this just lets a client
+        // whose link is congested ask us to ease off.
+        int effective = Math.min(config.perPlayerLimitKBps, desiredRate);
+        if (effective < CLIENT_RATE_FLOOR_KBPS) {
+            effective = CLIENT_RATE_FLOOR_KBPS;
+        }
+        state.sender.setRateLimitKBps(effective);
     }
 
     public void handleClientHint(ServerPlayer player, VoxyPacketPayload payload) {
@@ -416,7 +449,7 @@ public class LodStreamingService implements AutoCloseable {
                 " (pull mode deprecated, server-driven streaming only)");
     }
 
-    public void startSyncForPlayer(ServerPlayer player) {
+    public void startSyncForPlayer(ServerPlayer player, long cacheEpoch) {
         Logger.info("Received sync request from " + player.getName().getString());
         VoxyDiag.startWindow(60);
         VoxyDiag.event("startSyncForPlayer name=" + player.getName().getString());
@@ -437,6 +470,25 @@ public class LodStreamingService implements AutoCloseable {
         state.inMaintenance = false;
         state.lastPlayerSectionX = Integer.MIN_VALUE;
         state.lastPlayerSectionZ = Integer.MIN_VALUE;
+
+        // Restore the per-client sent-version record so a reconnect / dimension
+        // return only re-streams sections that actually changed since the client
+        // last had them, instead of the whole ring. Gated on the client's cache
+        // epoch: if it wiped its local LOD cache the epoch changes, the stored map
+        // is ignored, and we fall back to a full stream. The ring scan still runs
+        // from 0, but maybeQueueSection short-circuits up-to-date sections cheaply,
+        // so only genuine deltas get serialized and sent.
+        state.cacheEpoch = cacheEpoch;
+        if (cacheEpoch != 0L && state.lastSentVersion.isEmpty()) {
+            int restored = loadVersionMap(player.getUUID(), cacheEpoch, state.lastSentVersion);
+            if (restored > 0) {
+                Logger.info("[VoxyStream] restored " + restored + " sent-version entries for " +
+                        player.getName().getString() + " (cache epoch match) → delta-only stream");
+            } else {
+                Logger.info("[VoxyStream] no matching version cache for " +
+                        player.getName().getString() + " → full stream");
+            }
+        }
 
         BloomFilter savedFilter = loadPlayerCache(player.getUUID());
         if (savedFilter != null) {
@@ -553,19 +605,33 @@ public class LodStreamingService implements AutoCloseable {
 
             int radius = effectiveRadius(state);
 
-            // 1. Drain recently-dirty sections near this player
-            int dirtyFlushed = drainDirtyNear(state, px, pz, radius);
+            // Bound the heavy part of the tick (dirty drain + ring expansion) by a
+            // wall-clock budget so one tick can't monopolise the shared
+            // per-dimension scheduler thread during a resync burst — the cause of
+            // the "scheduler stalled" warnings. Work left undone resumes next tick.
+            long tickDeadlineNanos = System.nanoTime()
+                    + Math.max(1L, config.maxTickProcessingMillis) * 1_000_000L;
 
-            // 2. Expand the current ring
-            int sectionsFound = streamRing(state, px, pz, state.currentRing, radius);
+            // 1. Drain recently-dirty sections near this player
+            int dirtyFlushed = drainDirtyNear(state, px, pz, radius, tickDeadlineNanos);
+
+            // 2. Expand the current ring — only while we still have budget. If we
+            // run out mid-ring we leave currentRing put and re-run it next tick;
+            // already-sent sections short-circuit on the version check, so the
+            // retry is cheap.
+            boolean hadBudgetForRing = System.nanoTime() < tickDeadlineNanos;
+            int sectionsFound = hadBudgetForRing
+                    ? streamRing(state, px, pz, state.currentRing, radius, tickDeadlineNanos)
+                    : 0;
+            boolean ringComplete = hadBudgetForRing && System.nanoTime() < tickDeadlineNanos;
 
             if (sectionsFound > 0 || dirtyFlushed > 0) {
                 state.consecutiveEmptyRings = 0;
-            } else if (state.currentRing >= radius) {
+            } else if (ringComplete && state.currentRing >= radius) {
                 state.consecutiveEmptyRings++;
             }
 
-            if (state.currentRing < radius) {
+            if (ringComplete && state.currentRing < radius) {
                 state.currentRing++;
             }
 
@@ -600,6 +666,9 @@ public class LodStreamingService implements AutoCloseable {
                 long slow = Math.max(50L, (long) (1000.0 / Math.max(0.1, config.maintenanceTickHz)));
                 rescheduleTick(state, slow);
                 savePlayerCacheAsync(player.getUUID(), state.clientCacheFilter);
+                // Checkpoint the sent-version record once we've settled, so a crash
+                // or restart keeps the delta-streaming benefit on next connect.
+                saveVersionMapAsync(player.getUUID(), state.cacheEpoch, state.lastSentVersion);
                 Logger.info("Entering maintenance mode for " + player.getName().getString() +
                         " (slowTick=" + slow + "ms)");
             } else if (state.consecutiveEmptyRings < 5 && state.inMaintenance) {
@@ -633,14 +702,21 @@ public class LodStreamingService implements AutoCloseable {
         return Math.max(1, cap);
     }
 
-    private int drainDirtyNear(PlayerStreamingState state, int px, int pz, int radius) {
+    private int drainDirtyNear(PlayerStreamingState state, int px, int pz, int radius, long deadlineNanos) {
         List<Long> snap = snapshotDirty();
         if (snap.isEmpty()) {
             return 0;
         }
         int flushed = 0;
         int outOfRange = 0;
-        for (Long key : snap) {
+        int i = 0;
+        for (; i < snap.size(); i++) {
+            // Honour the per-tick budget. nanoTime is cheap but not free, so only
+            // sample it every 64 keys; anything left over is re-queued below.
+            if ((i & 0x3F) == 0 && System.nanoTime() > deadlineNanos) {
+                break;
+            }
+            long key = snap.get(i);
             // LOD-N section coords are in LOD-N's own scale; lift the player
             // coords + radius into the same scale before doing the chebyshev
             // check. Without this LOD-1+ keys at the player's actual location
@@ -662,15 +738,41 @@ public class LodStreamingService implements AutoCloseable {
                 flushed++;
             }
         }
+        // Anything we didn't reach this tick goes back on the queue so it isn't
+        // dropped; the next tick resumes from there.
+        if (i < snap.size()) {
+            requeueDirty(snap.subList(i, snap.size()));
+        }
         if (config.isLogDirtyDrainEffective() && (snap.size() >= 64 || flushed > 0)) {
             Logger.info("[VoxyStream] " + state.player.getName().getString() +
-                    " drained " + snap.size() + " dirty keys @ section(" + px + "," + pz +
+                    " drained " + i + "/" + snap.size() + " dirty keys @ section(" + px + "," + pz +
                     ") r=" + radius + " → flushed=" + flushed + " out-of-range=" + outOfRange);
         }
         return flushed;
     }
 
-    private int streamRing(PlayerStreamingState state, int px, int pz, int ring, int radius) {
+    /**
+     * Return dirty keys we couldn't process this tick to the front of the queue
+     * so the next tick resumes where we left off (FIFO order preserved). If
+     * re-adding overflows the cap, drop from the back (newest) — those keys get
+     * re-marked dirty by the next ingest / version bump anyway.
+     */
+    private void requeueDirty(List<Long> keys) {
+        if (keys.isEmpty()) {
+            return;
+        }
+        synchronized (dirtyLock) {
+            for (int j = keys.size() - 1; j >= 0; j--) {
+                recentlyDirtyKeys.addFirst(keys.get(j));
+            }
+            int cap = Math.max(256, config.dirtyQueueMaxEntries);
+            while (recentlyDirtyKeys.size() > cap) {
+                recentlyDirtyKeys.pollLast();
+            }
+        }
+    }
+
+    private int streamRing(PlayerStreamingState state, int px, int pz, int ring, int radius, long deadlineNanos) {
         if (ring > radius) {
             return 0;
         }
@@ -684,6 +786,12 @@ public class LodStreamingService implements AutoCloseable {
             for (int dz = -ring; dz <= ring; dz++) {
                 if (ring > 0 && Math.abs(dx) != ring && Math.abs(dz) != ring) {
                     continue;
+                }
+                // Out of per-tick budget: bail. tickPlayer detects this (still past
+                // the deadline on return) and re-runs the same ring next tick, so
+                // no perimeter coord is skipped.
+                if (System.nanoTime() > deadlineNanos) {
+                    return found;
                 }
                 int sectionX = px + dx;
                 int sectionZ = pz + dz;
@@ -849,10 +957,41 @@ public class LodStreamingService implements AutoCloseable {
             if (state.clientCacheFilter != null) {
                 savePlayerCacheAsync(playerId, state.clientCacheFilter);
             }
+            saveVersionMapAsync(playerId, state.cacheEpoch, state.lastSentVersion);
             cancel(state);
             state.close();
         }
         VoxyNetworkHandler.removePlayer(playerId);
+    }
+
+    /**
+     * Stop streaming a player in <i>this</i> dimension without tearing down their
+     * network registration — used when the player changes dimension.
+     * <p>
+     * Without this, the old dimension's per-player tick and dirty fast-push keep
+     * running for a player who is no longer here: they re-stream this dimension's
+     * sections onto the connection (and trigger a full "jumped N sections"
+     * resync), which both wastes bandwidth and leaks stale-dimension LODs into the
+     * world the player is now in (e.g. Nether LODs showing up in the Overworld
+     * after a round trip). The client re-issues a sync request on dimension change
+     * ({@code LodReceptionService}), so returning to this dimension restarts the
+     * stream cleanly. The bloom filter is persisted so the return re-streams only
+     * deltas.
+     */
+    public void stopStreamingForPlayer(UUID playerId) {
+        PlayerStreamingState state = playerStates.remove(playerId);
+        if (state != null) {
+            if (state.clientCacheFilter != null) {
+                savePlayerCacheAsync(playerId, state.clientCacheFilter);
+            }
+            // Persist the sent-version record so returning to this dimension only
+            // re-streams the delta accumulated while away.
+            saveVersionMapAsync(playerId, state.cacheEpoch, state.lastSentVersion);
+            cancel(state);
+            state.close();
+            Logger.info("[VoxyStream] stopped streaming for " + playerId +
+                    " (left dimension " + level.dimension().location() + ")");
+        }
     }
 
     private void cancel(PlayerStreamingState state) {
@@ -1006,6 +1145,15 @@ public class LodStreamingService implements AutoCloseable {
             Thread.currentThread().interrupt();
         }
 
+        autoRegenScheduler.shutdownNow();
+        try {
+            if (!autoRegenScheduler.awaitTermination(1, TimeUnit.SECONDS)) {
+                Logger.warn("autoRegenScheduler did not terminate within 1s on close()");
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+
         // Only now is it safe to shut the serialize pool down — no more tasks
         // can be submitted to it because the only submitters (tickPlayer + the
         // dirty fast-path) are gated on the active flag we just cleared.
@@ -1019,7 +1167,12 @@ public class LodStreamingService implements AutoCloseable {
             Thread.currentThread().interrupt();
         }
 
-        for (PlayerStreamingState state : playerStates.values()) {
+        for (Map.Entry<UUID, PlayerStreamingState> entry : playerStates.entrySet()) {
+            PlayerStreamingState state = entry.getValue();
+            // Synchronous save on shutdown: the serialize pool (which the async
+            // variant submits to) is already gone by here, and we want the record
+            // to survive a clean restart for delta streaming next session.
+            saveVersionMap(entry.getKey(), state.cacheEpoch, snapshotVersionMap(state.lastSentVersion));
             cancel(state);
             state.close();
         }
@@ -1086,6 +1239,99 @@ public class LodStreamingService implements AutoCloseable {
         }
     }
 
+    // ============ Per-client sent-version map persistence (delta streaming) ======== //
+
+    private Path getVersionMapDir() {
+        return Path.of("voxy_cache", "version_maps");
+    }
+
+    /**
+     * Per-(player, dimension) file. Scoped by dimension because one
+     * LodStreamingService exists per ServerLevel and they would otherwise collide
+     * on the same UUID (the bloom-filter cache has exactly this latent bug).
+     */
+    private Path versionMapFile(UUID playerId) {
+        String dim = level.dimension().location().toString().replaceAll("[^a-zA-Z0-9._-]", "_");
+        return getVersionMapDir().resolve(playerId + "_" + dim + ".vmap");
+    }
+
+    private java.util.HashMap<Long, Long> snapshotVersionMap(Map<Long, Long> map) {
+        return new java.util.HashMap<>(map);
+    }
+
+    private void saveVersionMapAsync(UUID playerId, long epoch, Map<Long, Long> map) {
+        if (epoch == 0L || map.isEmpty()) {
+            return;
+        }
+        java.util.HashMap<Long, Long> snapshot = snapshotVersionMap(map);
+        try {
+            serializeExecutor.submit(() -> saveVersionMap(playerId, epoch, snapshot));
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // Pool shut down (shutdown raced this call); the synchronous save in
+            // close() covers the shutdown path.
+        }
+    }
+
+    private void saveVersionMap(UUID playerId, long epoch, Map<Long, Long> map) {
+        if (epoch == 0L || map.isEmpty()) {
+            return;
+        }
+        try {
+            Files.createDirectories(getVersionMapDir());
+            Path file = versionMapFile(playerId);
+            try (DataOutputStream out = new DataOutputStream(
+                    new BufferedOutputStream(Files.newOutputStream(file)))) {
+                out.writeByte(VMAP_FORMAT_VERSION);
+                out.writeLong(epoch);
+                out.writeInt(map.size());
+                for (Map.Entry<Long, Long> e : map.entrySet()) {
+                    out.writeLong(e.getKey());
+                    out.writeLong(e.getValue());
+                }
+            }
+        } catch (IOException e) {
+            Logger.error("Failed to save version map for " + playerId + ": " + e.getMessage());
+        }
+    }
+
+    /**
+     * Load a persisted sent-version map into {@code into} iff the file exists and
+     * its stored epoch matches {@code expectedEpoch}. Returns the number of
+     * entries restored (0 on absence, epoch mismatch, or error → full re-stream).
+     */
+    private int loadVersionMap(UUID playerId, long expectedEpoch, Map<Long, Long> into) {
+        Path file = versionMapFile(playerId);
+        try {
+            if (!Files.exists(file)) {
+                return 0;
+            }
+            try (DataInputStream in = new DataInputStream(
+                    new BufferedInputStream(Files.newInputStream(file)))) {
+                if (in.readByte() != VMAP_FORMAT_VERSION) {
+                    return 0;
+                }
+                long epoch = in.readLong();
+                if (epoch != expectedEpoch) {
+                    return 0;
+                }
+                int count = in.readInt();
+                if (count < 0 || count > 5_000_000) {
+                    Logger.warn("Suspicious version-map entry count " + count + " for " + playerId + ", ignoring");
+                    return 0;
+                }
+                for (int i = 0; i < count; i++) {
+                    long key = in.readLong();
+                    long version = in.readLong();
+                    into.put(key, version);
+                }
+                return count;
+            }
+        } catch (IOException e) {
+            Logger.error("Failed to load version map for " + playerId + ": " + e.getMessage());
+            return 0;
+        }
+    }
+
     // ==================== Inner types ==================== //
 
     private static class PlayerStreamingState {
@@ -1100,6 +1346,9 @@ public class LodStreamingService implements AutoCloseable {
         boolean inMaintenance = false;
         int clientDesiredRate = SharedBandwidthLimit.DEFAULT_PLAYER_LIMIT_KBPS;
         int clientHintedRadius = 0; // 0 = use server default
+        // Client LOD cache nonce for this session; the persisted sent-version map
+        // is keyed by it so a wiped client cache (new epoch) invalidates our record.
+        long cacheEpoch = 0L;
         BloomFilter clientCacheFilter = null;
 
         int lastPlayerSectionX = Integer.MIN_VALUE;

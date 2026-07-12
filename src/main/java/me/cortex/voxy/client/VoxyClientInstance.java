@@ -117,6 +117,51 @@ public class VoxyClientInstance extends VoxyInstance {
         return this.basePath;
     }
 
+    private volatile long cacheEpoch = 0L;
+
+    /**
+     * Stable nonce identifying this client's local LOD cache for the connected
+     * server, persisted in the per-server storage root. Sent to the server in the
+     * sync request so it can decide whether its per-client sent-version record is
+     * still valid: if the user wipes the local cache, the file disappears, a new
+     * epoch is generated, and the server falls back to a full re-stream instead of
+     * trusting a stale record.
+     */
+    public long getOrCreateCacheEpoch() {
+        long e = this.cacheEpoch;
+        if (e != 0L) {
+            return e;
+        }
+        synchronized (this) {
+            if (this.cacheEpoch != 0L) {
+                return this.cacheEpoch;
+            }
+            Path f = this.basePath.resolve("streaming-cache-id");
+            long id = 0L;
+            try {
+                if (Files.exists(f)) {
+                    id = Long.parseLong(Files.readString(f).trim());
+                }
+            } catch (Exception ex) {
+                Logger.warn("Could not read streaming cache id, regenerating: " + ex.getMessage());
+            }
+            if (id == 0L) {
+                id = new java.util.Random().nextLong();
+                if (id == 0L) {
+                    id = 1L;
+                }
+                try {
+                    Files.createDirectories(this.basePath);
+                    Files.writeString(f, Long.toString(id));
+                } catch (Exception ex) {
+                    Logger.error("Could not persist streaming cache id: " + ex.getMessage());
+                }
+            }
+            this.cacheEpoch = id;
+            return id;
+        }
+    }
+
     @Override
     public boolean isIngestEnabled(WorldIdentifier worldId) {
         return (!this.noIngestOverride) && VoxyConfig.CONFIG.ingestEnabled;
