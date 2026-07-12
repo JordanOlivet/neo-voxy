@@ -36,6 +36,7 @@ Statuts : ✅ porté · 🟰 déjà couvert par un fix local équivalent · ⏭ 
 | `c2ba3c22` | while-loop processAllThings | 🟰 | Notre boucle wait/notify (timeout 100 ms) couvre le cas |
 | `6189ee38` | fix ingestion chunks au respawn/téléport | ✅ | Vérif position dans cheekyGetChunk + getChunk(FULL, false) dans les 2 chemins d'ingest |
 | `36964ee4` + `2a979ac0` + `c6b30e51` | lock file exclusif | 🚫 | Différé : désactivé par défaut upstream même aujourd'hui, faible valeur pour notre usage |
+| `a15d5e2b` (part) | race save : `setNotDirty` avant l'atomic → perte de changement | ✅ | Volet `SectionSavingService` porté : `setNotDirty()` déplacé **après** `exchangeIsInSaveQueue(false)` (sinon un markDirty+enqueue concurrent est clobberé). Volet `ActiveSectionTracker` **non porté** : notre `tryUnload` a divergé, cas déjà couvert par la garde `getRefCount()!=0` ; seul écart = recheck refCount post-writeLock, à évaluer séparément. Upstream lui-même le qualifie « attempted » |
 
 ## Lot 3 — Qualité rendu / features (PR `backport-render-quality`)
 
