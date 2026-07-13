@@ -27,10 +27,14 @@ public class SectionSavingService {
         var section = task.section;
         section.assertNotFree();
         try {
-            //Unmark it dirty here (if it wasnt or w/e) so that it doesnt pointlessly resave (in theory this should be safe to do)
-            section.setNotDirty();
+            //Unmark it dirty here so that it doesnt pointlessly resave. This MUST happen after the
+            //atomic exchange that transfers save-queue ownership: clearing dirty before the exchange
+            //races a concurrent markDirty+enqueue, silently dropping that section's pending changes.
             if (section.exchangeIsInSaveQueue(false)) {
+                section.setNotDirty();//do after the atomic exchange
                 task.engine.storage.saveSection(section);
+            } else {
+                section.setNotDirty();
             }
         } catch (Exception e) {
             Logger.error("Voxy saver had an exception while executing please check logs and report error", e);
