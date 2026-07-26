@@ -22,16 +22,30 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(value = DefaultChunkRenderer.class, remap = false)
 public abstract class MixinDefaultChunkRenderer extends ShaderChunkRenderer {
+    private static final String RENDER_ARGS_HEAD = "render(Lnet/caffeinemc/mods/sodium/client/render/chunk/ChunkRenderMatrices;"
+            + "Lnet/caffeinemc/mods/sodium/client/gl/device/CommandList;"
+            + "Lnet/caffeinemc/mods/sodium/client/render/chunk/lists/ChunkRenderListIterable;"
+            + "Lnet/caffeinemc/mods/sodium/client/render/chunk/terrain/TerrainRenderPass;"
+            + "Lnet/caffeinemc/mods/sodium/client/render/viewport/CameraTransform;";
+
+    /** Sodium 0.6.x. */
+    private static final String RENDER_0_6 = RENDER_ARGS_HEAD + ")V";
+
+    /** Sodium 0.8.x, which appended a trailing boolean. */
+    private static final String RENDER_0_8 = RENDER_ARGS_HEAD + "Z)V";
 
     public MixinDefaultChunkRenderer(RenderDevice device, ChunkVertexType vertexType) {
         super(device, vertexType);
     }
 
-    // The target arguments are pulled in with @Local(argsOnly) rather than declared
-    // on the handler: Sodium 0.8.x appended a trailing boolean to render(), so a
-    // literal argument list would only ever match a single Sodium branch. Matching
-    // by type keeps both 0.6.x and 0.8.x working.
-    @Inject(method = "render", at = @At(value = "HEAD"), cancellable = true)
+    // Sodium 0.8.x appended a trailing boolean to render(). Both descriptors are
+    // spelled out because remapJar resolves a bare "render" selector against the
+    // Sodium the mod was compiled with and bakes that descriptor into the
+    // annotation, which would pin the mixin to a single Sodium branch. Only one of
+    // the two ever resolves at runtime, hence require = 1. The arguments are then
+    // pulled in by type with @Local(argsOnly) so the handler itself stays common;
+    // all three types are unique among the target's parameters.
+    @Inject(method = { RENDER_0_6, RENDER_0_8 }, at = @At(value = "HEAD"), cancellable = true, require = 1)
     private void cancelThingie(CallbackInfo ci,
             @Local(argsOnly = true) ChunkRenderMatrices matrices,
             @Local(argsOnly = true) TerrainRenderPass renderPass,
@@ -44,7 +58,8 @@ public abstract class MixinDefaultChunkRenderer extends ShaderChunkRenderer {
         }
     }
 
-    @Inject(method = "render", at = @At(value = "INVOKE", target = "Lnet/caffeinemc/mods/sodium/client/render/chunk/ShaderChunkRenderer;end(Lnet/caffeinemc/mods/sodium/client/render/chunk/terrain/TerrainRenderPass;)V", shift = At.Shift.BEFORE))
+    @Inject(method = { RENDER_0_6,
+            RENDER_0_8 }, at = @At(value = "INVOKE", target = "Lnet/caffeinemc/mods/sodium/client/render/chunk/ShaderChunkRenderer;end(Lnet/caffeinemc/mods/sodium/client/render/chunk/terrain/TerrainRenderPass;)V", shift = At.Shift.BEFORE), require = 1)
     private void injectRender(CallbackInfo ci,
             @Local(argsOnly = true) ChunkRenderMatrices matrices,
             @Local(argsOnly = true) TerrainRenderPass renderPass,
