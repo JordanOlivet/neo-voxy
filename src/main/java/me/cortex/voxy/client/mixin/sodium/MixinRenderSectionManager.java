@@ -7,13 +7,11 @@ import me.cortex.voxy.client.core.VoxyRenderSystem;
 import me.cortex.voxy.common.util.ModLoaderUtil;
 import me.cortex.voxy.common.world.service.VoxelIngestService;
 import me.cortex.voxy.commonImpl.VoxyCommon;
-import net.caffeinemc.mods.sodium.client.gl.device.CommandList;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionManager;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.executor.ChunkBuilder;
 import net.caffeinemc.mods.sodium.client.render.chunk.data.BuiltSectionInfo;
 import net.caffeinemc.mods.sodium.client.render.chunk.map.ChunkTrackerHolder;
-import net.caffeinemc.mods.sodium.client.render.chunk.translucent_sorting.SortBehavior;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.level.ChunkPos;
@@ -44,11 +42,15 @@ public class MixinRenderSectionManager {
     @Final
     private ChunkBuilder builder;
 
+    // No constructor arguments are captured here on purpose: Sodium changed the
+    // RenderSectionManager constructor signature between 0.6.x (ClientLevel, int,
+    // CommandList) and 0.8.x (ClientLevel, int, SortBehavior, CommandList). A
+    // CallbackInfo-only handler matches any of them, and everything we need is
+    // already assigned to the shadowed fields by the time we reach TAIL.
     @Inject(method = "<init>", at = @At("TAIL"))
-    private void voxy$resetChunkTracker(ClientLevel level, int renderDistance, CommandList commandList,
-            CallbackInfo ci) {
-        if (level.levelRenderer != null) {
-            var system = ((IGetVoxyRenderSystem) (level.levelRenderer)).getVoxyRenderSystem();
+    private void voxy$resetChunkTracker(CallbackInfo ci) {
+        if (this.level.levelRenderer != null) {
+            var system = ((IGetVoxyRenderSystem) (this.level.levelRenderer)).getVoxyRenderSystem();
             if (system != null) {
                 system.chunkBoundRenderer.reset();
             }

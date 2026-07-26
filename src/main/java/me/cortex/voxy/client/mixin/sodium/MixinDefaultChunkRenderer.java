@@ -1,14 +1,14 @@
 package me.cortex.voxy.client.mixin.sodium;
 
+import com.llamalad7.mixinextras.sugar.Local;
+
 import me.cortex.voxy.client.VoxyClient;
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
 
-import net.caffeinemc.mods.sodium.client.gl.device.CommandList;
 import net.caffeinemc.mods.sodium.client.gl.device.RenderDevice;
 import net.caffeinemc.mods.sodium.client.render.chunk.ChunkRenderMatrices;
 import net.caffeinemc.mods.sodium.client.render.chunk.DefaultChunkRenderer;
 import net.caffeinemc.mods.sodium.client.render.chunk.ShaderChunkRenderer;
-import net.caffeinemc.mods.sodium.client.render.chunk.lists.ChunkRenderListIterable;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.DefaultTerrainRenderPasses;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
 import net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.ChunkVertexType;
@@ -27,10 +27,15 @@ public abstract class MixinDefaultChunkRenderer extends ShaderChunkRenderer {
         super(device, vertexType);
     }
 
+    // The target arguments are pulled in with @Local(argsOnly) rather than declared
+    // on the handler: Sodium 0.8.x appended a trailing boolean to render(), so a
+    // literal argument list would only ever match a single Sodium branch. Matching
+    // by type keeps both 0.6.x and 0.8.x working.
     @Inject(method = "render", at = @At(value = "HEAD"), cancellable = true)
-    private void cancelThingie(ChunkRenderMatrices matrices, CommandList commandList,
-            ChunkRenderListIterable renderLists, TerrainRenderPass renderPass, CameraTransform camera,
-            CallbackInfo ci) {
+    private void cancelThingie(CallbackInfo ci,
+            @Local(argsOnly = true) ChunkRenderMatrices matrices,
+            @Local(argsOnly = true) TerrainRenderPass renderPass,
+            @Local(argsOnly = true) CameraTransform camera) {
         if (VoxyClient.disableSodiumChunkRender()) {
             super.begin(renderPass);
             this.doRender(matrices, renderPass, camera);
@@ -40,9 +45,10 @@ public abstract class MixinDefaultChunkRenderer extends ShaderChunkRenderer {
     }
 
     @Inject(method = "render", at = @At(value = "INVOKE", target = "Lnet/caffeinemc/mods/sodium/client/render/chunk/ShaderChunkRenderer;end(Lnet/caffeinemc/mods/sodium/client/render/chunk/terrain/TerrainRenderPass;)V", shift = At.Shift.BEFORE))
-    private void injectRender(ChunkRenderMatrices matrices, CommandList commandList,
-            ChunkRenderListIterable renderLists, TerrainRenderPass renderPass, CameraTransform camera,
-            CallbackInfo ci) {
+    private void injectRender(CallbackInfo ci,
+            @Local(argsOnly = true) ChunkRenderMatrices matrices,
+            @Local(argsOnly = true) TerrainRenderPass renderPass,
+            @Local(argsOnly = true) CameraTransform camera) {
         this.doRender(matrices, renderPass, camera);
     }
 
