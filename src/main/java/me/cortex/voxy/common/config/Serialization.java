@@ -117,6 +117,9 @@ public class Serialization {
             if (clzName.contains("VoxyConfigScreenPages")) {
                 continue;// Dont want to modmenu incase it doesnt exist
             }
+            if (clzName.contains("VoxySodiumConfig")) {
+                continue;// Sodium 0.8 config entry point; linking it on 0.6.x would fail
+            }
             if (clzName.endsWith("VoxyConfig")) {
                 continue;// Special case to prevent recursive loading pain
             }

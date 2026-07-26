@@ -39,11 +39,41 @@ loom {
     accessWidenerPath = file("src/main/resources/voxy.accesswidener")
 }
 
+// Sodium 0.8.x replaced the options GUI that MixinSodiumOptionsGUI hooks with a
+// registration API (net.caffeinemc.mods.sodium.api.config) that does not exist in
+// 0.6.x. The 0.8 entry point therefore lives in its own source set compiled
+// against 0.8.12, while the main source set keeps targeting 0.6.13. Both paths end
+// up in the same jar and each is dormant on the Sodium branch it does not match.
+sourceSets {
+    sodium8 {
+        compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
+    }
+}
+
 configurations {
     bundle {
         canBeResolved = true
         canBeConsumed = false
     }
+    // Resolves the Sodium 0.8.x artifact for extraction only; never a compile or
+    // runtime classpath itself.
+    sodium8Api {
+        canBeResolved = true
+        canBeConsumed = false
+        transitive = false
+    }
+}
+
+// Sodium 0.8.x moved its actual mod classes into a nested JarJar and left only
+// the bootstrap service in the outer jar, so depending on the artifact directly
+// exposes none of the config API. Unpack the inner jar instead. It ships in
+// Mojang mappings already, which is what NeoForge runs, so it needs no remapping
+// and can be a plain compileOnly dependency.
+def extractSodium8Api = tasks.register("extractSodium8Api", Copy) {
+    from { zipTree(configurations.sodium8Api.singleFile).matching { include "META-INF/jarjar/*-mod.jar" } }
+    into layout.buildDirectory.dir("sodium8-api")
+    eachFile { it.relativePath = new RelativePath(true, it.name) }
+    includeEmptyDirs = false
 }
 
 def targetJavaVersion = 21
@@ -68,6 +98,11 @@ dependencies {
 
     // Sodium for NeoForge (required dependency)
     modImplementation "maven.modrinth:sodium:mc1.21.1-0.6.13-neoforge"
+    // The 0.8.x config API, compile-only and scoped to the sodium8 source set, so
+    // nothing outside it can accidentally link against 0.8-only classes.
+    sodium8Api "maven.modrinth:sodium:mc1.21.1-0.8.12-neoforge"
+    sodium8CompileOnly fileTree(dir: layout.buildDirectory.dir("sodium8-api"), include: "*.jar")
+            .builtBy(extractSodium8Api)
     // Sodium's bundled JarJars (service + Fabric API renderer modules)
     // Loom dev environment doesn't extract NeoForge JarJars at runtime, so add them explicitly
     runtimeOnly fileTree(dir: "libs", include: "*.jar")
@@ -92,6 +127,7 @@ shadowJar {
     exclude "fabric.mod.json"
     configurations = [project.configurations.bundle]
     archiveClassifier.set("dev-shadow")
+    from sourceSets.sodium8.output
 }
 
 remapJar {
