@@ -7,13 +7,11 @@ import me.cortex.voxy.client.core.VoxyRenderSystem;
 import me.cortex.voxy.common.util.ModLoaderUtil;
 import me.cortex.voxy.common.world.service.VoxelIngestService;
 import me.cortex.voxy.commonImpl.VoxyCommon;
-import net.caffeinemc.mods.sodium.client.gl.device.CommandList;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionManager;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.executor.ChunkBuilder;
 import net.caffeinemc.mods.sodium.client.render.chunk.data.BuiltSectionInfo;
 import net.caffeinemc.mods.sodium.client.render.chunk.map.ChunkTrackerHolder;
-import net.caffeinemc.mods.sodium.client.render.chunk.translucent_sorting.SortBehavior;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.level.ChunkPos;
@@ -44,17 +42,14 @@ public class MixinRenderSectionManager {
     @Final
     private ChunkBuilder builder;
 
-    @Inject(method = "<init>", at = @At("TAIL"))
-    private void voxy$resetChunkTracker(ClientLevel level, int renderDistance, CommandList commandList,
-            CallbackInfo ci) {
-        if (level.levelRenderer != null) {
-            var system = ((IGetVoxyRenderSystem) (level.levelRenderer)).getVoxyRenderSystem();
-            if (system != null) {
-                system.chunkBoundRenderer.reset();
-            }
-        }
-        this.bottomSectionY = this.level.getMinBuildHeight() >> 4;
-    }
+    // There is deliberately no hook on the constructor here. Sodium changed its
+    // signature between 0.6.x (ClientLevel, int, CommandList) and 0.8.x
+    // (ClientLevel, int, SortBehavior, CommandList), and remapJar bakes the
+    // compile-time descriptor into a bare "<init>" selector, which pins the mixin
+    // to whichever Sodium it was built against. The chunk tracker is reset from
+    // MixinSodiumWorldRenderer#initRenderer instead — that is the method which
+    // constructs the RenderSectionManager, and its descriptor is identical across
+    // both branches.
 
     @Inject(method = "onChunkRemoved", at = @At("HEAD"))
     private void injectIngest(int x, int z, CallbackInfo ci) {
@@ -100,8 +95,6 @@ public class MixinRenderSectionManager {
     private long cachedChunkPos = -1;
     @Unique
     private int cachedChunkStatus;
-    @Unique
-    private int bottomSectionY;
 
     @Redirect(method = "updateSectionInfo", at = @At(value = "INVOKE", target = "Lnet/caffeinemc/mods/sodium/client/render/chunk/RenderSection;setInfo(Lnet/caffeinemc/mods/sodium/client/render/chunk/data/BuiltSectionInfo;)Z"))
     private boolean voxy$updateOnUpload(RenderSection instance, BuiltSectionInfo info) {
@@ -140,7 +133,10 @@ public class MixinRenderSectionManager {
                 // teleport transitions the blind getChunk could hand back wrong data
                 var chunk = this.level.getChunkSource().getChunk(x, z, ChunkStatus.FULL, false);
                 if (chunk != null) {
-                    var section = chunk.getSection(y - this.bottomSectionY);
+                    // Cheap enough to derive per upload, and avoids caching level
+                    // geometry in a field that only a constructor hook could fill.
+                    int bottomSectionY = this.level.getMinBuildHeight() >> 4;
+                    var section = chunk.getSection(y - bottomSectionY);
                     var lp = this.level.getLightEngine();
 
                     var csp = SectionPos.of(x, y, z);
