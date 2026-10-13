@@ -1,0 +1,45 @@
+// Applied by each loader project: compiles the common sources and packs the
+// common resources together with the loader's own, so every loader jar is
+// self-contained (MultiLoader Template pattern, ADR-007).
+plugins {
+    id 'multiloader-common'
+}
+
+configurations {
+    commonJava {
+        canBeResolved = true
+    }
+    commonResources {
+        canBeResolved = true
+    }
+}
+
+dependencies {
+    commonJava project(path: ':common', configuration: 'commonJava')
+    commonResources project(path: ':common', configuration: 'commonResources')
+}
+
+tasks.named('compileJava', JavaCompile) {
+    dependsOn(configurations.commonJava)
+    source(configurations.commonJava)
+}
+
+processResources {
+    dependsOn(configurations.commonResources)
+    from(configurations.commonResources)
+
+    def expandProps = [
+            'version'          : version,
+            'minecraft_version': minecraft_version,
+    ]
+    filesMatching(['META-INF/neoforge.mods.toml', 'fabric.mod.json']) {
+        expand expandProps
+    }
+    inputs.properties(expandProps)
+}
+
+jar {
+    from(rootProject.file('LICENSE.md')) {
+        rename { "LICENSE_${archives_base_name}.md" }
+    }
+}

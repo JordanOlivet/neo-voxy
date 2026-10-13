@@ -2,26 +2,21 @@
 #
 # setup-dev.sh — bootstrap the neo-voxy development environment.
 #
-# Provisions everything a fresh clone needs but does NOT carry in git
-# (the whole `libs/` directory is .gitignored), plus a JDK if the machine
-# has none:
+# Everything the build needs is resolved by Gradle (Minecraft through
+# ModDevGradle, mod dependencies such as Sodium, Iris and Chunky through the
+# Modrinth Maven), so a fresh clone only needs a JVM to launch Gradle:
 #
 #   1. A launcher JVM        (downloads Temurin 21 only if no java is found;
 #                             the Java 21 *compile* toolchain is auto-provisioned
 #                             by Gradle via the foojay resolver — see settings.gradle)
-#   2. libs/chunky-nf/*.jar  (Chunky NeoForge build — required to compile the
-#                             Chunky integration mixin; the Modrinth Maven only
-#                             serves the Forge variant, so we pull it from the API)
-#   3. libs/*.jar            (Sodium's bundled JarJars — needed by runClient;
-#                             best-effort, extracted from the Sodium artifact)
-#   4. ./gradlew genSources  (decompiled MC sources for IDE navigation;
+#   2. ./gradlew build       (prepares Minecraft, compiles, runs unit tests;
 #                             use --quick to compile only, --no-build to skip)
 #
 # Idempotent: safe to re-run. Works under Git Bash on Windows and natively on
-# Linux/macOS. Windows users can run scripts/setup-dev.ps1 instead.
+# Linux. Windows users can run scripts/setup-dev.ps1 instead.
 #
 # Usage:
-#   scripts/setup-dev.sh [--quick] [--no-build] [--force-chunky] [--help]
+#   scripts/setup-dev.sh [--quick] [--no-build] [--help]
 #
 set -euo pipefail
 
@@ -36,15 +31,13 @@ err()  { printf '\033[1;31m[setup:err]\033[0m %s\n'  "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # --------------------------------------------------------------- args ----
-BUILD_TASK="genSources"   # default: full decompile for IDE
-FORCE_CHUNKY=0
+BUILD_TASK="build"
 for a in "$@"; do
   case "$a" in
     --quick)        BUILD_TASK="compileJava" ;;
     --no-build)     BUILD_TASK="" ;;
-    --force-chunky) FORCE_CHUNKY=1 ;;
     --help|-h)
-      sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) warn "unknown argument: $a" ;;
   esac
@@ -104,81 +97,17 @@ ensure_java() {
   warn "    export JAVA_HOME=\"$JAVA_HOME\""
 }
 
-# ---------------------------------------------------------------- chunky ----
-ensure_chunky() {
-  mkdir -p libs/chunky-nf
-  if [ "$FORCE_CHUNKY" = 0 ] && ls libs/chunky-nf/*.jar >/dev/null 2>&1; then
-    log "chunky: already present ($(ls libs/chunky-nf/*.jar | xargs -n1 basename | paste -sd, -))"
-    return 0
-  fi
-
-  log "chunky: resolving NeoForge build for MC $MC_VERSION via Modrinth API"
-  # Filter to neoforge builds for our MC version; the API returns them newest
-  # first, so the first non-sources jar URL is the build we want. (Plain grep is
-  # used deliberately: jq isn't always installed and the Windows `python3` is
-  # often the Microsoft Store stub that just errors out.)
-  local api="https://api.modrinth.com/v2/project/chunky/version?loaders=%5B%22neoforge%22%5D&game_versions=%5B%22${MC_VERSION}%22%5D"
-  local json; json="$(curl -fsSL "$api")"
-
-  local url filename
-  url="$(printf '%s' "$json" \
-        | grep -oE 'https://cdn\.modrinth\.com/[^"]+\.jar' \
-        | grep -viE 'sources|javadoc' \
-        | head -n1)"
-  [ -n "$url" ] || { err "chunky: no NeoForge build found for MC $MC_VERSION (Modrinth API)"; return 1; }
-  filename="$(basename "$url")"
-  dl "$url" "libs/chunky-nf/$filename"
-  log "chunky: installed libs/chunky-nf/$filename"
-}
-
-# --------------------------------------------------------- sodium jarjars ----
-ensure_sodium_jarjars() {
-  # build.gradle adds libs/*.jar as runtimeOnly/forgeRuntimeLibrary: these are
-  # the nested jars Sodium ships via NeoForge JarJar (service + Fabric API
-  # renderer modules) that Loom's dev runtime does not auto-extract. Only needed
-  # for runClient, so failures here are non-fatal.
-  if ls libs/*.jar >/dev/null 2>&1; then
-    log "sodium jarjars: libs/*.jar already present, skipping"
-    return 0
-  fi
-  local sv; sv="$(sed -nE 's/.*maven\.modrinth:sodium:([^"]+)".*/\1/p' build.gradle | head -n1)"
-  sv="${sv:-mc1.21.1-0.6.13-neoforge}"
-  log "sodium jarjars: extracting from sodium $sv"
-
-  local jar; jar="$(mktemp).jar"
-  local url="https://api.modrinth.com/maven/maven/modrinth/sodium/${sv}/sodium-${sv}.jar"
-  if ! dl "$url" "$jar"; then
-    warn "sodium: download failed — runClient may be missing JarJars ($url)"
-    rm -f "$jar"; return 0
-  fi
-  local tmp; tmp="$(mktemp -d)"
-  if unzip -o -q "$jar" 'META-INF/jarjar/*.jar' -d "$tmp" 2>/dev/null \
-       && ls "$tmp"/META-INF/jarjar/*.jar >/dev/null 2>&1; then
-    cp "$tmp"/META-INF/jarjar/*.jar libs/
-    log "sodium jarjars: copied $(ls "$tmp"/META-INF/jarjar/*.jar | wc -l | tr -d ' ') jar(s) into libs/"
-  else
-    warn "sodium: no META-INF/jarjar entries found — skipping (runClient may still work)"
-  fi
-  rm -rf "$tmp" "$jar"
-}
-
 # ----------------------------------------------------------------- build ----
 run_build() {
   [ -n "$BUILD_TASK" ] || { log "build: skipped (--no-build)"; return 0; }
   local gw="./gradlew"
   [ -x "$gw" ] || gw="sh ./gradlew"
-  if [ "$BUILD_TASK" = genSources ]; then
-    log "build: ./gradlew genSources (decompiling MC — can take a few minutes)"
-  else
-    log "build: ./gradlew $BUILD_TASK"
-  fi
+  log "build: ./gradlew $BUILD_TASK (first run prepares Minecraft — can take a few minutes)"
   $gw $BUILD_TASK
 }
 
 # ------------------------------------------------------------------ main ----
 log "neo-voxy dev bootstrap — MC $MC_VERSION, $OS/$ARCH"
 ensure_java
-ensure_chunky
-ensure_sodium_jarjars
 run_build
 log "done. You can now build with:  ./gradlew build   (or: rtk ./gradlew build)"

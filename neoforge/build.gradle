@@ -1,0 +1,129 @@
+plugins {
+    id 'multiloader-loader'
+    id 'net.neoforged.moddev'
+    id 'com.github.johnrengelman.shadow'
+}
+
+// Sodium 0.8.x replaced the options GUI that MixinSodiumOptionsGUI hooks with a
+// registration API (net.caffeinemc.mods.sodium.api.config) that does not exist in
+// 0.6.x. The 0.8 entry point therefore lives in its own source set compiled
+// against 0.8.12, while the main source set keeps targeting 0.6.13. Both paths end
+// up in the same jar and each is dormant on the Sodium branch it does not match
+// (ADR-003).
+sourceSets {
+    sodium8 {
+        compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
+    }
+}
+
+neoForge {
+    version = neoforge_version
+    accessTransformers.from(project(':common').file('src/main/resources/META-INF/accesstransformer.cfg'))
+
+    runs {
+        configureEach {
+            ideName = "NeoForge ${it.name.capitalize()} (${project.path})"
+        }
+        client {
+            client()
+            // ./gradlew :neoforge:runClient -PquickPlay=<save name> loads a world directly.
+            if (project.hasProperty('quickPlay')) {
+                programArguments.addAll('--quickPlaySingleplayer', project.property('quickPlay').toString())
+            }
+            // -PauditMixins forces every mixin to apply at client setup (VoxyClient).
+            if (project.hasProperty('auditMixins')) {
+                systemProperty('voxy.auditMixins', 'true')
+            }
+        }
+        server {
+            server()
+            programArgument '--nogui'
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.sodium8
+        }
+    }
+}
+
+configurations {
+    // Resolves the Sodium 0.8.x artifact for extraction only; never a compile or
+    // runtime classpath itself.
+    sodium8Api {
+        canBeResolved = true
+        canBeConsumed = false
+        transitive = false
+    }
+}
+
+// Sodium 0.8.x moved its actual mod classes into a nested JarJar and left only
+// the bootstrap service in the outer jar, so depending on the artifact directly
+// exposes none of the config API. Unpack the inner jar instead. It ships in
+// Mojang mappings already, so it needs no remapping.
+def extractSodium8Api = tasks.register("extractSodium8Api", Copy) {
+    from { zipTree(configurations.sodium8Api.singleFile).matching { include "META-INF/jarjar/*-mod.jar" } }
+    into layout.buildDirectory.dir("sodium8-api")
+    eachFile { it.relativePath = new RelativePath(true, it.name) }
+    includeEmptyDirs = false
+}
+
+dependencies {
+    // Sodium is required on the client; dev runs use 0.6.x. The 0.8.x jar
+    // cannot run in dev: its outer bootstrap jar and nested mod jar must be
+    // loaded on separate layers, which only a real install does.
+    compileOnly "maven.modrinth:sodium:${sodium_neoforge_version}"
+    runtimeOnly "maven.modrinth:sodium:${sodium_neoforge_version}"
+    // Optional integrations, compile-only. -PwithIris adds Iris to dev runs.
+    compileOnly "maven.modrinth:iris:${iris_neoforge_version}"
+    if (project.hasProperty('withIris')) {
+        runtimeOnly "maven.modrinth:iris:${iris_neoforge_dev_version}"
+    }
+    compileOnly "maven.modrinth:lithium:${lithium_neoforge_version}"
+    compileOnly "maven.modrinth:chunky:${chunky_neoforge_version}"
+
+    // The 0.8.x config API, scoped to the sodium8 source set so nothing outside
+    // it can accidentally link against 0.8-only classes.
+    sodium8Api "maven.modrinth:sodium:${sodium8_neoforge_version}"
+    sodium8CompileOnly fileTree(dir: layout.buildDirectory.dir("sodium8-api"), include: "*.jar")
+            .builtBy(extractSodium8Api)
+}
+
+// Plain libraries are not visible to mods in dev runs unless added here.
+configurations.additionalRuntimeClasspath.extendsFrom configurations.bundle
+
+// The bundled lwjgl-lmdb/zstd modules require LWJGL core, which the client
+// ships but a dedicated server does not.
+configurations {
+    serverLwjgl {
+        canBeResolved = true
+        canBeConsumed = false
+        transitive = false
+    }
+}
+dependencies {
+    serverLwjgl "org.lwjgl:lwjgl:${lwjgl_version}"
+    serverLwjgl "org.lwjgl:lwjgl:${lwjgl_version}:natives-windows"
+    serverLwjgl "org.lwjgl:lwjgl:${lwjgl_version}:natives-linux"
+}
+neoForge.runs.server.additionalRuntimeClasspathConfiguration.extendsFrom configurations.serverLwjgl
+
+// The shipped jar: common + NeoForge classes, the sodium8 entry point and the
+// bundled libraries. NeoForge 1.21.1 runs Mojang mappings, so no remapping step.
+shadowJar {
+    configurations = [project.configurations.bundle]
+    from sourceSets.sodium8.output
+    archiveClassifier.set('')
+    // Fabric-only metadata coming from the common resources.
+    exclude 'voxy.accesswidener'
+    // A bundled library's module descriptor must not name the mod's module.
+    exclude '**/module-info.class'
+}
+
+jar {
+    archiveClassifier.set('slim')
+}
+
+assemble.dependsOn shadowJar

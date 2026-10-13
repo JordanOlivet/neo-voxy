@@ -1,0 +1,62 @@
+// Loader-agnostic code (ADR-007): compiled against vanilla Minecraft only, so
+// any accidental use of a loader API or of a NeoForge-patched vanilla method
+// fails here. Loader hooks go through the services in commonImpl.platform
+// (ADR-008).
+plugins {
+    id 'multiloader-common'
+    id 'net.neoforged.moddev'
+}
+
+neoForge {
+    neoFormVersion = neo_form_version
+    accessTransformers.from(file('src/main/resources/META-INF/accesstransformer.cfg'))
+    // Unit tests use Minecraft's libraries (fastutil, gson...) and some vanilla types.
+    addModdingDependenciesTo(sourceSets.test)
+}
+
+dependencies {
+    // Mixin as shipped by both loaders (Fabric's fork: `order` on injectors).
+    compileOnly 'net.fabricmc:sponge-mixin:0.15.2+mixin.0.8.7'
+    // Both loaders ship MixinExtras 0.4.x (@WrapMethod).
+    compileOnly 'io.github.llamalad7:mixinextras-common:0.4.1'
+
+    // Mod APIs, compile-only. The NeoForge builds are already in Mojang
+    // mappings, so they need no remapping and stand in for both loaders here.
+    compileOnly "maven.modrinth:sodium:${sodium_neoforge_version}"
+    compileOnly "maven.modrinth:iris:${iris_neoforge_version}"
+    compileOnly "maven.modrinth:lithium:${lithium_neoforge_version}"
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testImplementation 'org.lz4:lz4-java:1.8.0'
+    testRuntimeOnly "org.lwjgl:lwjgl:${lwjgl_version}:natives-windows"
+    testRuntimeOnly "org.lwjgl:lwjgl:${lwjgl_version}:natives-linux"
+    testRuntimeOnly "org.lwjgl:lwjgl-zstd:${lwjgl_version}:natives-windows"
+    testRuntimeOnly "org.lwjgl:lwjgl-zstd:${lwjgl_version}:natives-linux"
+    testRuntimeOnly "org.lwjgl:lwjgl-lmdb:${lwjgl_version}:natives-windows"
+    testRuntimeOnly "org.lwjgl:lwjgl-lmdb:${lwjgl_version}:natives-linux"
+}
+
+test {
+    useJUnitPlatform()
+    // Keep the log4j logs/ folder the tests create out of the source tree.
+    def testRunDir = layout.buildDirectory.dir("test-run").get().asFile
+    workingDir = testRunDir
+    doFirst { testRunDir.mkdirs() }
+}
+
+configurations {
+    commonJava {
+        canBeResolved = false
+        canBeConsumed = true
+    }
+    commonResources {
+        canBeResolved = false
+        canBeConsumed = true
+    }
+}
+
+artifacts {
+    commonJava sourceSets.main.java.sourceDirectories.singleFile
+    commonResources sourceSets.main.resources.sourceDirectories.singleFile
+}
