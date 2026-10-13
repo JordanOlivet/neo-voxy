@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "package": "me.cortex.voxy.fabric.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "minVersion": "0.8",
+  "client": [
+    "MixinDebugScreenOverlay",
+    "MixinScreenshot"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

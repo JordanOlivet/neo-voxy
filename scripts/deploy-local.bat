@@ -2,7 +2,7 @@
 REM Builds neo-voxy for one loader and copies the jar into the local Minecraft
 REM client mods folder and the matching local test server (dev\server-<loader>\mods).
 REM
-REM Usage: scripts\deploy-local.bat [neoforge]
+REM Usage: scripts\deploy-local.bat [neoforge|fabric]   (default: neoforge)
 REM Override the client mods folder with the CLIENT_MODS environment variable.
 setlocal
 
@@ -27,7 +27,7 @@ if errorlevel 1 (
 )
 
 REM Pick the newest release jar (build/libs keeps older versions around):
-REM sorted oldest first, the last match wins; -sources / -slim / -dev variants skipped.
+REM sorted oldest first, the last match wins; -sources and dev variants skipped.
 set JAR=
 for /f "delims=" %%F in ('dir /b /o:d "%LIBS%\neo-voxy-%LOADER%-*.jar" 2^>nul') do (
     echo %%~nF | findstr /r /c:"-sources *$" /c:"-slim *$" /c:"-dev *$" /c:"-dev-shadow *$" >nul || set JAR=%LIBS%\%%F

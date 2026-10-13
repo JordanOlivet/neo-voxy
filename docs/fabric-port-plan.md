@@ -26,7 +26,7 @@ Settled decisions live in [`DECISIONS.md`](DECISIONS.md) as ADRs.
 | D3 | Platform abstraction mechanism | ADR-008, accepted: `ServiceLoader` |
 | D4 | Jar naming | ADR-009, proposed |
 | D5 | Mod id / display name on Fabric | ADR-009, proposed |
-| D6 | Minimum Fabric Loader / Fabric API versions | Latest stable builds for 1.21.1 at implementation time (recorded in `gradle.properties`) |
+| D6 | Minimum Fabric Loader / Fabric API versions | ADR-010, proposed: Loader 0.16+, any Fabric API (dev: 0.109.0) |
 
 ---
 
@@ -84,8 +84,8 @@ vanilla cannot build while any of them remains.
 - [x] P2.3 Server lifecycle: turn `VoxyServer`'s 9 `@SubscribeEvent` handlers into plain static methods; NeoForge listener class in `neoforge/` forwards to them
 - [x] P2.4 Networking: split `VoxyNetworkHandler` into payload definitions + handlers (`common`) and registration/sending (`PacketSender` service per loader)
 - [x] P2.5 Client hooks: `ClientChunkIngestListener`, `DebugSidecarListener`, `VoxyDebugScreenEntry` — logic in `common`, event subscription in `neoforge/`
-- [ ] P2.6 Commands: make `VoxyCommands` generic over the source type `<S extends SharedSuggestionProvider>` so Fabric's `FabricClientCommandSource` fits
-- [ ] P2.7 Sodium 0.8 entrypoint: keep option-building logic shared, isolate the `@ConfigEntryPointForge` annotation in `neoforge/`
+- [x] P2.6 Commands: make `VoxyCommands` generic over the source type `<S extends SharedSuggestionProvider>` so Fabric's `FabricClientCommandSource` fits
+- [x] P2.7 Sodium 0.8 entrypoint: keep option-building logic shared, isolate the `@ConfigEntryPointForge` annotation in `neoforge/`
 - [x] P2.8 Chunky: `MixinNeoForgeWorld` + `voxy-chunky.mixins.json` move to `neoforge/`; shared ingest logic stays in `common`
 - [x] P2.9 Verify: `grep -r net.neoforged common/` empty; same in-game matrix as P1.8
 
@@ -93,10 +93,10 @@ vanilla cannot build while any of them remains.
 
 ## Phase 3 — Fabric module skeleton
 
-- [ ] P3.1 `fabric` subproject on Fabric Loom with the `multiloader-loader` convention (compiles the common sources, refmap for common mixins)
-- [ ] P3.2 Dependencies (1.21.1, Fabric variants): Fabric Loader, Fabric API, Sodium `mc1.21.1-0.6.13-fabric` (required), Iris 1.8.x fabric, Lithium 0.15.x fabric, Chunky fabric (all optional, `modCompileOnly`)
-- [ ] P3.3 `fabric.mod.json`: entrypoints, mixin configs, access widener, `depends`/`recommends`/`breaks`
-- [ ] P3.4 Empty `ModInitializer` / `ClientModInitializer`; `./gradlew :fabric:build` and `:fabric:runClient` boot to title screen
+- [x] P3.1 `fabric` subproject on Fabric Loom with the `multiloader-loader` convention (compiles the common sources, refmap for common mixins)
+- [x] P3.2 Dependencies (1.21.1, Fabric variants): Fabric Loader, Fabric API, Sodium `mc1.21.1-0.6.13-fabric` (required), Iris 1.8.x fabric, Lithium 0.15.x fabric, Chunky fabric (all optional, `modCompileOnly`)
+- [x] P3.3 `fabric.mod.json`: entrypoints, mixin configs, access widener, `depends`/`recommends`/`breaks`
+- [x] P3.4 Empty `ModInitializer` / `ClientModInitializer`; `./gradlew :fabric:build` and `:fabric:runClient` boot to title screen
 
 ---
 
@@ -118,17 +118,17 @@ vanilla cannot build while any of them remains.
 | `CustomizeGuiOverlayEvent.DebugText` | **No Fabric API event** — mixin on `DebugScreenOverlay` |
 | `FMLClientSetupEvent` | `ClientModInitializer` (check GL context availability for `VoxyClient.initVoxyClient`) |
 
-- [ ] P4.1 `Platform` + `PacketSender` Fabric implementations
-- [ ] P4.2 Entrypoints wiring `VoxyCommon.cleanInit`, server and client hooks
-- [ ] P4.3 Server lifecycle, chunk, level, tick, player events
-- [ ] P4.4 Networking (payload types registered for both directions)
-- [ ] P4.5 Client chunk ingest
-- [ ] P4.6 Server and client commands
-- [ ] P4.7 Screenshot mixin (F2 debug sidecar)
-- [ ] P4.8 F3 debug text mixin
-- [ ] P4.9 Chunky: mixin on Chunky's Fabric world adapter
-- [ ] P4.10 Sodium 0.8 on Fabric: find the Fabric entrypoint mechanism for the config API (entrypoint key in `fabric.mod.json`, to confirm in the 0.8 Fabric jar) and how its classes are nested (`META-INF/jars/` vs NeoForge JarJar) for the compile classpath
-- [ ] P4.11 Check every mixin applies on Fabric (12 Minecraft targets may differ where NeoForge patches vanilla); run with `-Dmixin.debug.verify=true`
+- [x] P4.1 `Platform` + `PacketSender` Fabric implementations
+- [x] P4.2 Entrypoints wiring `VoxyCommon.cleanInit`, server and client hooks
+- [x] P4.3 Server lifecycle, chunk, level, tick, player events
+- [x] P4.4 Networking (payload types registered for both directions)
+- [x] P4.5 Client chunk ingest
+- [x] P4.6 Server and client commands
+- [x] P4.7 Screenshot mixin (F2 debug sidecar)
+- [x] P4.8 F3 debug text mixin
+- [x] P4.9 Chunky: mixin on Chunky's Fabric world adapter
+- [~] P4.10 Sodium 0.8 on Fabric (entrypoint `sodium:config_api_user` in place, compiled against the Mojang-mapped 0.8 API; not runnable in dev, to test in a real install): find the Fabric entrypoint mechanism for the config API (entrypoint key in `fabric.mod.json`, to confirm in the 0.8 Fabric jar) and how its classes are nested (`META-INF/jars/` vs NeoForge JarJar) for the compile classpath
+- [x] P4.11 Check every mixin applies on Fabric (12 Minecraft targets may differ where NeoForge patches vanilla); run with `-Dmixin.debug.verify=true`
 
 ---
 
@@ -138,25 +138,33 @@ Both loaders, manual in-game tests (real MC install, see testing workflow).
 
 | Scenario | NeoForge | Fabric |
 |----------|:--------:|:------:|
+| Unit tests (shared `common`) | ✅ | ✅ |
+| Dev server boots, Voxy server instance, clean stop | ✅ | ✅ |
+| Real dedicated server with the shipped jar | ✅ | ✅ |
+| Chunky pregen ingest (real server) | ☐ | ✅ |
+| Client mixin audit, Sodium 0.6.13 | ✅ | ✅ |
+| Client mixin audit, Sodium 0.6.13 + Iris | ✅ (1.8.12) | ✅ (1.8.8) |
 | Solo world, LOD build + render | ☐ | ☐ |
 | Sodium 0.6.13 options page | ☐ | ☐ |
-| Sodium 0.8.12 options page | ☐ | ☐ |
-| Iris + shader pack | ☐ | ☐ |
-| Dedicated server, LOD streaming to client | ☐ | ☐ |
+| Sodium 0.8.12 (options page, mixins) | ☐ | ☐ |
+| Iris + shader pack in game | ☐ | ☐ |
+| Client on dedicated server, LOD streaming | ☐ | ☐ |
 | Dimension change / disconnect / reconnect | ☐ | ☐ |
-| Chunky pregen ingest | ☐ | ☐ |
-| Lithium present | ☐ | ☐ |
+| Lithium present | ☐ (server only ✅) | ☐ |
 | F2 sidecar + F3 overlay | ☐ | ☐ |
 | Client-only mode on vanilla server | ☐ | ☐ |
 
-- [ ] P5.1 `dev/server-fabric/` local test server (mirrors `dev/server-neoforge/`)
-- [ ] P5.2 Run the matrix, file issues for every failure
+✅ verified on 2026-10-14 without a player (see the progress log); ☐ needs an
+in-game test.
+
+- [x] P5.1 `dev/server-fabric/` local test server (mirrors `dev/server-neoforge/`)
+- [~] P5.2 Run the matrix, file issues for every failure
 
 ---
 
 ## Phase 6 — Release
 
-- [ ] P6.1 CI builds and uploads both jars
-- [ ] P6.2 README: per-loader requirements and install steps
-- [ ] P6.3 CLAUDE.md: new layout, build commands per subproject (`:neoforge:runClient`, `:fabric:runClient`), Fabric specifics
+- [~] P6.1 CI builds and uploads both jars (workflow in place; no Actions run seen on the repo yet)
+- [x] P6.2 README: per-loader requirements and install steps
+- [x] P6.3 CLAUDE.md: new layout, build commands per subproject (`:neoforge:runClient`, `:fabric:runClient`), Fabric specifics
 - [ ] P6.4 Version bump (minor) and release notes

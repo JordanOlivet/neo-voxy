@@ -1,7 +1,7 @@
 # Neo-Voxy
 
-Far-distance rendering mod for Minecraft **1.21.1**, using LODs (levels of
-detail) to render massive view distances.
+Far-distance rendering mod for Minecraft **1.21.1** on **NeoForge and Fabric**,
+using LODs (levels of detail) to render massive view distances.
 
 Neo-Voxy started as a NeoForge port of [Voxy](https://github.com/MCRcortex/voxy)
 (Fabric) and has since become an independent hard fork: it targets MC 1.21.1
@@ -23,17 +23,19 @@ only, has its own versioning, and carries features the original does not have.
 
 ## Requirements
 
-| Dependency | Version | |
-|------------|---------|---|
-| Minecraft | 1.21.1 | required |
-| NeoForge | 21.1.77+ | required |
-| Java | 21 | required |
-| Sodium (NeoForge) | 0.6.x or 0.8.x | required (client) |
-| Iris (NeoForge) | 1.8.x | optional, shader support |
-| Lithium (NeoForge) | 0.15.x | optional |
-| Chunky (NeoForge) | 1.4.x | optional |
+| Dependency | NeoForge | Fabric | |
+|------------|----------|--------|---|
+| Minecraft | 1.21.1 | 1.21.1 | required |
+| Loader | NeoForge 21.1.77+ | Fabric Loader 0.16+ and Fabric API | required |
+| Java | 21 | 21 | required |
+| Sodium | 0.6.x or 0.8.x | 0.6.x or 0.8.x | required on the client |
+| Iris | 1.8.x | 1.8.x | optional, shader support |
+| Lithium | 0.15.x | 0.15.x | optional |
+| Chunky | 1.4.x | 1.4.x | optional, pregenerated chunks are ingested |
 
-Fabric support is in progress, see [`docs/fabric-port-plan.md`](docs/fabric-port-plan.md).
+Use the jar matching your loader (`neo-voxy-neoforge-*.jar` or
+`neo-voxy-fabric-*.jar`). Server-side LOD streaming needs Voxy on both sides,
+with the same loader.
 
 Known incompatibility: BetterFpsDist.
 
@@ -43,7 +45,7 @@ This is a **source-only** fork: build it yourself (see License).
 
 ```bash
 scripts/setup-dev.sh        # first clone: ensures a JVM, then builds
-./gradlew build             # jar in neoforge/build/libs/
+./gradlew build             # jars in neoforge/build/libs/ and fabric/build/libs/
 ```
 
 On Windows, `scripts/setup-dev.ps1` does the same as `setup-dev.sh`, and
@@ -56,6 +58,7 @@ On Windows, `scripts/setup-dev.ps1` does the same as `setup-dev.sh`, and
 |------|---------|
 | `common/` | Loader-agnostic code (~95%), resources, unit tests |
 | `neoforge/` | NeoForge entry point, event wiring, platform services |
+| `fabric/` | Fabric entry points, event wiring, platform services, Fabric-only mixins |
 | `buildSrc/` | Shared Gradle conventions (MultiLoader Template) |
 | `docs/` | Plans, decisions (`DECISIONS.md`), progress logs, analyses |
 | `scripts/` | Dev environment setup and local deploy helpers |

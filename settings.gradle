@@ -40,3 +40,4 @@ plugins {
 rootProject.name = 'neo-voxy'
 include('common')
 include('neoforge')
+include('fabric')

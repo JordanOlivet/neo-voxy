@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "id": "voxy",
+  "version": "${version}",
+  "name": "Neo-Voxy",
+  "description": "Far distance rendering mod utilizing LoDs for massive render distances.",
+  "authors": [
+    "Cortex"
+  ],
+  "contact": {
+    "sources": "https://github.com/JordanOlivet/neo-voxy"
+  },
+  "license": "All-Rights-Reserved",
+  "icon": "assets/voxy/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "me.cortex.voxy.fabric.VoxyFabric"
+    ],
+    "client": [
+      "me.cortex.voxy.fabric.VoxyFabricClient"
+    ],
+    "sodium:config_api_user": [
+      "me.cortex.voxy.client.config.VoxySodiumConfig"
+    ]
+  },
+  "mixins": [
+    "voxy.mixins.json",
+    "voxy-common.mixins.json",
+    "voxy-fabric.mixins.json",
+    "voxy-chunky.mixins.json"
+  ],
+  "accessWidener": "voxy.accesswidener",
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "fabric-api": "*",
+    "minecraft": "1.21.1",
+    "java": ">=21"
+  },
+  "recommends": {
+    "sodium": ">=0.6.0"
+  },
+  "breaks": {
+    "sodium": "<0.6.0"
+  }
+}
