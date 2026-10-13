@@ -195,4 +195,8 @@ dependencies {
 
 test {
     useJUnitPlatform()
+    // Keep the log4j logs/ folder the tests create out of the repository root.
+    def testRunDir = layout.buildDirectory.dir("test-run").get().asFile
+    workingDir = testRunDir
+    doFirst { testRunDir.mkdirs() }
 }

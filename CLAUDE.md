@@ -10,6 +10,34 @@ Voxy fournit un rendu LOD (Level of Detail) pour des distances de rendu massives
 - **Java** : 21 (requis)
 - **Build system** : Architectury Loom 1.10-SNAPSHOT + Shadow plugin
 
+## Logs de progression (OBLIGATOIRE)
+
+Chaque session de travail sur ce repo DOIT laisser une trace dans
+`docs/progress-logs/`. Regles completes et template :
+`docs/progress-logs/README.md`.
+
+- **Debut de session**, lire dans l'ordre : le dernier
+  `docs/progress-logs/YYYY-MM-DD.md` (point de reprise), `docs/DECISIONS.md`
+  (ADRs, contraignants), puis le plan concerne dans `docs/` (ex.
+  `docs/fabric-port-plan.md`), avant de toucher au code.
+- **Fin de session** : ecrire (ou completer, si une session a deja eu lieu le
+  jour meme) `docs/progress-logs/YYYY-MM-DD.md` AVANT le commit final, et le
+  commiter avec le travail decrit (meme branche, meme PR). Un fichier par jour.
+- Cocher les items du plan avances pendant la session et les citer par ID.
+- Une session sans code (investigation, decision) produit aussi un log.
+- Toute decision structurelle = une entree ADR dans `docs/DECISIONS.md`
+  (revenir dessus = nouvelle ADR qui la remplace, jamais une reecriture).
+
+## Organisation du repo (ADR-006)
+
+| Chemin | Contenu |
+|--------|---------|
+| `src/` | Sources, ressources, tests unitaires du mod |
+| `docs/` | `DECISIONS.md`, plans (`fabric-port-plan.md`), `progress-logs/`, `upstream-backports.md`, `analysis/` (historique), `diagnostics/` |
+| `scripts/` | `setup-dev.sh`/`.ps1` (bootstrap), `deploy-local.bat` (build + copie du jar vers `.minecraft/mods` et `dev/server-neoforge/mods`) |
+| `dev/` | Etat runtime local (serveurs de test), gitignore sauf `dev/README.md` |
+| `libs/`, `run/`, `build/`, `bin/` | Gitignores (jars recuperes, run dir Loom, sorties de build/IDE) |
+
 ## Structure du projet
 
 ```
@@ -111,10 +139,10 @@ Le pipeline de rendu est hierarchique :
 
 ## Points d'attention
 
-- Le streaming LOD continu casse le rendu Iris (bug connu)
+- Streaming LOD continu + Iris : bug historique, plus reproduit (a reverifier seulement si signale)
 - 290 TODOs dans le code, dont certains critiques (ZSTD, RocksDB)
 - Les binding points Iris sont hardcodes (indices 5, 10, 6)
-- Pas de tests automatises
+- Tests unitaires JUnit dans `src/test` (pas de tests en jeu automatises) ; ils tournent dans `build/test-run/`
 
 ## Conventions
 

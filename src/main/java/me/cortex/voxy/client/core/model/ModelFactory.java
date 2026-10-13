@@ -143,7 +143,7 @@ public class ModelFactory {
     // per-face opacity mask packed in 4 longs per face (24 longs per blockstate).
     // Mirrors the current per-face faceOccludes bit (translucent / offset>=0.1 →
     // empty mask) but at per-pixel granularity. Wiring into RenderDataFactory
-    // callsites is a separate follow-up — see ANALYSIS.md item 11 step 4.
+    // callsites is a separate follow-up — see docs/analysis/port-analysis.md item 11 step 4.
 
     // TODO: what might work maybe, is that all the transparent pixels should be set
     // to the average of the other pixels
