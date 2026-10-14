@@ -144,18 +144,18 @@ Both loaders, manual in-game tests (real MC install, see testing workflow).
 | Chunky pregen ingest (real server) | ☐ | ✅ |
 | Client mixin audit, Sodium 0.6.13 | ✅ | ✅ |
 | Client mixin audit, Sodium 0.6.13 + Iris | ✅ (1.8.12) | ✅ (1.8.8) |
-| Solo world, LOD build + render | ☐ | ☐ |
-| Sodium 0.6.13 options page | ☐ | ☐ |
+| Solo world, LOD build + render | ✅ | ✅ |
+| Sodium 0.6.13 options page | ✅ | ✅ |
 | Sodium 0.8.12 (options page, mixins) | ☐ | ☐ |
-| Iris + shader pack in game | ☐ | ☐ |
-| Client on dedicated server, LOD streaming | ☐ | ☐ |
-| Dimension change / disconnect / reconnect | ☐ | ☐ |
+| Iris + shader pack in game | ✅ | ✅ |
+| Client on dedicated server, LOD streaming | ✅ | ✅ |
+| Dimension change / disconnect / reconnect | ☐ | ✅ |
 | Lithium present | ☐ (server only ✅) | ☐ |
-| F2 sidecar + F3 overlay | ☐ | ☐ |
-| Client-only mode on vanilla server | ☐ | ☐ |
+| F2 sidecar + F3 overlay | ✅ | ✅ |
+| Client-only mode on vanilla server | ☐ | ✅ |
 
-✅ verified on 2026-10-14 without a player (see the progress log); ☐ needs an
-in-game test.
+✅ verified on 2026-10-14, by dev runs and scripted dev clients (see the
+progress log); ☐ needs an in-game test.
 
 - [x] P5.1 `dev/server-fabric/` local test server (mirrors `dev/server-neoforge/`)
 - [~] P5.2 Run the matrix, file issues for every failure

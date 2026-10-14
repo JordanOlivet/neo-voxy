@@ -62,6 +62,11 @@ dependencies {
     modCompileOnly "maven.modrinth:iris:${iris_fabric_version}"
     if (project.hasProperty('withIris')) {
         modLocalRuntime "maven.modrinth:iris:${iris_fabric_dev_version}"
+        // Iris nests these with jar-in-jar, which a dev run does not unpack;
+        // without them loading any shader pack fails (NoClassDefFoundError).
+        localRuntime "io.github.douira:glsl-transformer:2.0.1"
+        localRuntime "org.anarres:jcpp:1.4.14"
+        localRuntime "org.antlr:antlr4-runtime:4.13.1"
     }
     modCompileOnly "maven.modrinth:lithium:${lithium_fabric_version}"
     modCompileOnly "maven.modrinth:chunky:${chunky_fabric_version}"
