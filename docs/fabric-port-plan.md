@@ -167,4 +167,4 @@ progress log); ☐ needs an in-game test.
 - [~] P6.1 CI builds and uploads both jars (workflow in place; no Actions run seen on the repo yet)
 - [x] P6.2 README: per-loader requirements and install steps
 - [x] P6.3 CLAUDE.md: new layout, build commands per subproject (`:neoforge:runClient`, `:fabric:runClient`), Fabric specifics
-- [ ] P6.4 Version bump (minor) and release notes
+- [x] P6.4 Version bump (minor) and release notes (1.3.0 to 1.4.0, notes in the PR and the 2026-10-14 log)

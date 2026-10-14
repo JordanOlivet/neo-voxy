@@ -283,6 +283,12 @@ Each line: what happened, the lesson, the design rule for the new mod.
 | Protocol version "1" hard-coded, no capability handshake | Every format will change | Version negotiation and capability flags from the first release |
 | No network compression, fixed streaming radius regardless of client | Waste | Compress, and let the client declare what it can display |
 
+### Debug UI
+
+| What happened | Lesson | Design rule |
+|---|---|---|
+| On Fabric the Voxy F3 block is appended after vanilla's targeted-block lines, so it scrolls off screen whenever the player looks at a block (seen 2026-10-14) | Each loader inserts debug lines at a different place | Insert our F3 lines at a fixed, deliberate position on every loader (before the targeted-block section), keep them short, and offer a dedicated debug overlay/key for the detailed statistics |
+
 ### Process and tooling that paid off
 
 - The F2 sidecar dump, `/voxy dumpAtlas`, `/voxy debugBounds`, the mixin audit
@@ -897,7 +903,8 @@ loader-<x>/   NeoForge / Fabric / Paper entry points and services
 - Explicit lifecycles and state machines (client session, world, dimension).
 - Typed config with schema, migrations, presets and hardware-tier detection.
 - Structured logging, debug HUD, one-command **diagnostic bundle** (logs,
-  config, GPU info, F2-style dumps).
+  config, GPU info, F2-style dumps). F3 lines at the same, always-visible
+  position on every loader (see the Debug UI lesson in §3).
 
 ### 13.3 Testing
 
