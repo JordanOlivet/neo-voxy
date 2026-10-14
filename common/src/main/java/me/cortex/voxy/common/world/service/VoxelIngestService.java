@@ -15,7 +15,6 @@ import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
-import net.minecraft.world.level.lighting.LayerLightSectionStorage;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.concurrent.ConcurrentLinkedDeque;
@@ -98,6 +97,8 @@ public class VoxelIngestService {
         engine.markActive();
 
         var lightingProvider = chunk.getLevel().getLightEngine();
+        var blp = lightingProvider.getLayerListener(LightLayer.BLOCK);
+        var slp = lightingProvider.getLayerListener(LightLayer.SKY);
         boolean gotLighting = false;
 
         int i = chunk.getMinSection() - 1;
@@ -108,7 +109,11 @@ public class VoxelIngestService {
             allEmpty&=section.hasOnlyAir();
             //if (section.isEmpty()) continue;
             var pos = SectionPos.of(chunk.getPos(), i);
-            if (lightingProvider.getDebugSectionType(LightLayer.SKY, pos) != LayerLightSectionStorage.SectionType.LIGHT_AND_DATA && lightingProvider.getDebugSectionType(LightLayer.BLOCK, pos) != LayerLightSectionStorage.SectionType.LIGHT_AND_DATA)
+            // getDataLayerData reads the light engine's published snapshot (volatile map +
+            // synchronized queue) and is safe off the light thread. getDebugSectionType
+            // reads a plain Long2ByteOpenHashMap the light thread mutates concurrently,
+            // which threw ArrayIndexOutOfBoundsException during chunk loads.
+            if (slp.getDataLayerData(pos) == null && blp.getDataLayerData(pos) == null)
                 continue;
             gotLighting = true;
         }
@@ -132,10 +137,6 @@ public class VoxelIngestService {
         if (!gotLighting) {
             return false;
         }
-
-        var blp = lightingProvider.getLayerListener(LightLayer.BLOCK);
-        var slp = lightingProvider.getLayerListener(LightLayer.SKY);
-
 
         i = chunk.getMinSection() - 1;
         for (var section : chunk.getSections()) {
