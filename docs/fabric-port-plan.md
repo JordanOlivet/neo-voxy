@@ -69,7 +69,7 @@ exist yet. This is the riskiest phase.
 - [x] P1.5 Bundling: the libraries currently shaded via the `bundle` configuration keep shipping inside the jar (shadow or `jarJar`), natives for Windows + Linux only (ADR-004)
 - [x] P1.6 `sodium8` source set + `extractSodium8Api` moved to `neoforge` (the `@ConfigEntryPointForge` class is NeoForge-bound until P2.7)
 - [x] P1.7 CI on `JordanOlivet/ci-workflows` `build-gradle-mod.yml`; `scripts/setup-dev.*` and `scripts/deploy-local.bat` updated for the new layout
-- [~] P1.8 Verify (in-game smoke test and Sodium 0.8.12 left to the user; see the 2026-10-14 log): unit tests pass; jar content compared with the pre-migration jar (classes, resources, bundled libs, `neoforge.mods.toml`); dev server and dev client boot with all mixins applied; in-game smoke test (solo + `dev/server-neoforge`), Sodium 0.6.13 **and** 0.8.12, with and without Iris
+- [~] P1.8 Verify (in-game smoke test and Sodium 0.8.12 left to the user; see the 2026-10-14 log): unit tests pass; jar content compared with the pre-migration jar (classes, resources, bundled libs, `neoforge.mods.toml`); dev server and dev client boot with all mixins applied; in-game smoke test (solo + `dev/server-neoforge`), Sodium 0.6.13 **and** 0.8.12, with and without Iris **Closed 2026-10-14 by user decision: remaining in-game checks accepted untested (Neo-Voxy development ends with 1.4.0).**
 
 ---
 
@@ -127,7 +127,7 @@ vanilla cannot build while any of them remains.
 - [x] P4.7 Screenshot mixin (F2 debug sidecar)
 - [x] P4.8 F3 debug text mixin
 - [x] P4.9 Chunky: mixin on Chunky's Fabric world adapter
-- [~] P4.10 Sodium 0.8 on Fabric (entrypoint `sodium:config_api_user` in place, compiled against the Mojang-mapped 0.8 API; not runnable in dev, to test in a real install): find the Fabric entrypoint mechanism for the config API (entrypoint key in `fabric.mod.json`, to confirm in the 0.8 Fabric jar) and how its classes are nested (`META-INF/jars/` vs NeoForge JarJar) for the compile classpath
+- [~] P4.10 Sodium 0.8 on Fabric (entrypoint `sodium:config_api_user` in place, compiled against the Mojang-mapped 0.8 API; not runnable in dev, to test in a real install): find the Fabric entrypoint mechanism for the config API (entrypoint key in `fabric.mod.json`, to confirm in the 0.8 Fabric jar) and how its classes are nested (`META-INF/jars/` vs NeoForge JarJar) for the compile classpath **Closed 2026-10-14 by user decision: remaining in-game checks accepted untested (Neo-Voxy development ends with 1.4.0).**
 - [x] P4.11 Check every mixin applies on Fabric (12 Minecraft targets may differ where NeoForge patches vanilla); run with `-Dmixin.debug.verify=true`
 
 ---
@@ -146,25 +146,27 @@ Both loaders, manual in-game tests (real MC install, see testing workflow).
 | Client mixin audit, Sodium 0.6.13 + Iris | ✅ (1.8.12) | ✅ (1.8.8) |
 | Solo world, LOD build + render | ✅ | ✅ |
 | Sodium 0.6.13 options page | ✅ | ✅ |
-| Sodium 0.8.12 (options page, mixins) | ☐ | ☐ |
+| Sodium 0.8.12 (options page, mixins) | ⊘ | ⊘ |
 | Iris + shader pack in game | ✅ | ✅ |
 | Client on dedicated server, LOD streaming | ✅ | ✅ |
-| Dimension change / disconnect / reconnect | ☐ | ✅ |
-| Lithium present | ☐ (server only ✅) | ☐ |
+| Dimension change / disconnect / reconnect | ⊘ | ✅ |
+| Lithium present | ⊘ (server only ✅) | ⊘ |
 | F2 sidecar + F3 overlay | ✅ | ✅ |
-| Client-only mode on vanilla server | ☐ | ✅ |
+| Client-only mode on vanilla server | ⊘ | ✅ |
 
 ✅ verified on 2026-10-14, by dev runs and scripted dev clients (see the
 progress log); ☐ needs an in-game test.
+⊘ accepted untested by user decision on 2026-10-14 (project closed; nothing
+abnormal seen during the scripted sessions).
 
 - [x] P5.1 `dev/server-fabric/` local test server (mirrors `dev/server-neoforge/`)
-- [~] P5.2 Run the matrix, file issues for every failure
+- [~] P5.2 Run the matrix, file issues for every failure **Closed 2026-10-14 by user decision: remaining in-game checks accepted untested (Neo-Voxy development ends with 1.4.0).**
 
 ---
 
 ## Phase 6 — Release
 
-- [~] P6.1 CI builds and uploads both jars (workflow in place; no Actions run seen on the repo yet)
+- [x] P6.1 CI builds and uploads both jars (runs green on every PR of the stack; artifact `neo-voxy-jars` = both 84 MB jars)
 - [x] P6.2 README: per-loader requirements and install steps
 - [x] P6.3 CLAUDE.md: new layout, build commands per subproject (`:neoforge:runClient`, `:fabric:runClient`), Fabric specifics
 - [x] P6.4 Version bump (minor) and release notes (1.3.0 to 1.4.0, notes in the PR and the 2026-10-14 log)

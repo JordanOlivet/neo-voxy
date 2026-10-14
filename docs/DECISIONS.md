@@ -111,7 +111,7 @@ Rejected: `@ExpectPlatform` (Architectury bytecode transformation).
 
 ## ADR-009 — Artifact naming and mod identity across loaders
 
-**Date**: 2026-10-14 · **Status**: proposed
+**Date**: 2026-10-14 · **Status**: accepted
 
 - Jars: `neo-voxy-neoforge-<version>.jar` and `neo-voxy-fabric-<version>.jar`.
 - Mod id `voxy` on both loaders: Neo-Voxy and upstream Voxy are mutually
@@ -122,7 +122,7 @@ Rejected: `@ExpectPlatform` (Architectury bytecode transformation).
 
 ## ADR-010 — Fabric build specifics
 
-**Date**: 2026-10-14 · **Status**: proposed
+**Date**: 2026-10-14 · **Status**: accepted
 
 - Fabric Loom 1.8 with Gradle 8.10, same toolchain as krios. Mods built with a
   newer Loom cannot be remapped by it: Sodium 0.8.12 Fabric (Loom 1.16) is
