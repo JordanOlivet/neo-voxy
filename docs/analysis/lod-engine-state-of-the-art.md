@@ -1,6 +1,7 @@
 # A new LOD mod: state of the art, lessons learned and design space
 
-> **Status**: analysis, input for a Q&A session. Nothing here is decided.
+> **Status**: analysis; first user answers recorded on 2026-10-14 (see
+> [§1.1](#11-user-answers-2026-10-14)), the detailed Q&A is still to come.
 > **Date**: 2026-10-14.
 > **Scope**: everything we could use to build our own Minecraft LOD (level of
 > detail) mod from a blank page: the ecosystem as of October 2026, what Distant
@@ -73,8 +74,9 @@ would arrive exactly when both incumbents have to re-architect.
 
 **Preliminary recommendations** (to challenge in the Q&A):
 
-1. **Clean room**: new repository, new history, no code copied from Voxy or
-   Neo-Voxy. We keep our knowledge (written as specs), not our code (§2).
+1. **Fresh repository**: new history, no code copied as is. Voxy-derived
+   parts are rewritten from their behavior; our own Neo-Voxy concepts are
+   reused freely (§2).
 2. **Engine core independent of Minecraft** (pure Java library: data model,
    storage, LOD selection, meshing, protocol), thin per-version and per-loader
    adapters, and a **rendering hardware interface (RHI) with tiers**: native
@@ -112,7 +114,35 @@ would arrive exactly when both incumbents have to re-architect.
 
 ## 1. Goals, non-goals and success metrics
 
-### Goals (as stated by the user)
+### 1.1 User answers (2026-10-14)
+
+| Topic | Answer |
+|---|---|
+| Repository | New, empty repository, separate from Neo-Voxy |
+| Reuse | Do not copy Neo-Voxy code as is, but reuse the concepts, many of which are our own (see §2) |
+| Minecraft versions | **Both** 1.21.1 and 26.x, planned from the start; the user plays 1.21.1 today, 26.x matters as mods migrate |
+| License | Undecided; the repository stays **private** until the mod is presentable |
+| Name | Working idea "Horizon Voxels"; open to suggestions (§1.4) |
+| Platforms | **Windows and Linux** first |
+| Minimum hardware | No announced minimum; a wide configuration range lets players scale the cost up or down |
+| Shader packs | Goal: **any shader pack works without pack-specific configuration**, if at all possible (§10.1) |
+| Multiplayer | Expect **large servers**: streaming must be very robust and fast |
+| Unexplored terrain | Show it, even coarsely |
+| Distance | Feel of infinite view; 64 chunks was already good in Neo-Voxy; allow 256, 512 and more, the player or the server operator picks the limit |
+| Schedule and team | No deadline, personal project done properly; one developer plus Claude |
+
+### 1.2 Requirements added on 2026-10-14
+
+- **Bulk LOD build for an existing world**: when the mod is added to a world
+  that already exists, one command builds the LOD of everything already
+  generated, without a player having to visit it. It must be schedulable or
+  at least throttled (run at night) because it can be heavy. Region-file
+  import (§7) is the natural implementation.
+- **v2, not a priority: world map with LOD state**: a map of the world where
+  each chunk shows its LOD state (color overlay or similar) to spot problems
+  quickly, and where errors and logs can be shown.
+
+### 1.3 Goals (as stated by the user)
 
 - Ultra-performant, seamless far-terrain rendering.
 - Low RAM, VRAM and disk usage.
@@ -120,16 +150,37 @@ would arrive exactly when both incumbents have to re-architect.
 - NeoForge and Fabric from one codebase (we just did this for Neo-Voxy).
 - Free to break with existing architectures when it buys a real advantage.
 
-### Candidate non-goals (to confirm)
+### 1.4 Candidate non-goals (to confirm)
 
 - Minecraft versions before 1.21.1.
 - Rendering entities or block entities as LOD (beyond simple, opt-in cases).
 - Replacing Sodium for near terrain (possible long-term, see §9.5).
-- macOS: out of scope for Neo-Voxy (ADR-004), but **Mojang now ships Vulkan
-  on macOS through MoltenVK**. A Vulkan-first engine gets macOS almost for
-  free, so this deserves to be revisited.
+- macOS: not targeted at first (user answer: Windows and Linux). Mojang now
+  ships Vulkan on macOS through MoltenVK, so a Vulkan-first engine keeps the
+  door open at low cost.
 
-### Success metrics (proposal)
+### 1.5 Name ideas
+
+"Horizon Voxels" is free on Modrinth (no project, slug `horizon-voxels`
+unused). Its weakness: "Horizon" is strongly associated with Distant
+Horizons, so players may assume a fork or an addon. Alternatives whose
+Modrinth slug was unused on 2026-10-14:
+
+| Name | Slug | Note |
+|---|---|---|
+| Horizon Voxels | `horizon-voxels` | User's idea; descriptive; close to Distant Horizons |
+| Voxel Horizon | `voxel-horizon` | Same idea, same caveat |
+| Skyline | `skyline` | Short, evokes far views; generic word |
+| Farfield | `farfield` | The "far field" of a renderer; distinctive |
+| Vantage | `vantage` | "Vantage point"; short |
+| Evervista | `evervista` | Coined word, unique, "endless view" |
+| Overlook | `overlook` | A viewpoint over a landscape |
+
+Taken or crowded: Vista, Vistas, Panorama, Longview (a reverse-Z mod),
+Sightline, Afar. A trademark and web search is still needed before going
+public.
+
+### 1.6 Success metrics (proposal)
 
 Define them before writing code, and measure them in CI and with a fixed set
 of reference worlds:
@@ -157,7 +208,7 @@ of reference worlds:
 | Source | License | Reading for ideas | Copying code |
 |---|---|---|---|
 | Voxy (upstream) | All rights reserved, "do not redistribute" **[verified, LICENSE.md]** | Yes (ideas and algorithms are not copyrightable) | **No** |
-| Neo-Voxy | Derived from Voxy, same restriction | Yes | **No**, including the parts we wrote inside the fork: treat the whole tree as tainted |
+| Neo-Voxy | Fork of Voxy, never published (private the whole time) | Yes, and **our own concepts are reusable** | Not as is: files derived from Voxy code stay derivative even unpublished; our original designs are ours to reimplement |
 | Distant Horizons | LGPL-3.0-only **[verified]** | Yes | Possible, but the copied files stay LGPL-3.0 and impose its obligations |
 | Sodium | PolyForm Shield 1.0.0 **[verified]** | Yes | No; using its API from a mod is fine, building a product that competes with Sodium is not |
 | Iris | LGPL-3.0 **[verified]** | Yes | As for DH |
@@ -166,12 +217,18 @@ of reference worlds:
 
 ### Clean-room process (proposal)
 
+0. Clarification from the user (2026-10-14): Neo-Voxy was never published,
+   and a significant part of what we built is original (server streaming
+   with cache epochs, bloom filters and congestion control, the debug
+   tooling, the multi-loader layer, many fixes). Those concepts are ours and
+   can be reused; the rule is only to not copy code as is.
 1. New repository and new git history.
 2. Before coding, write **behavioral specifications** from what we know
    (this document, our ADRs, the bug memories): formats, invariants, edge
    cases. Specs describe *what* and *why*, never paste code.
-3. Implement from the specs only. Do not open Voxy or Neo-Voxy source while
-   writing the matching component.
+3. Implement from the specs. Voxy-derived parts are rewritten from their
+   behavior, not ported; our own Neo-Voxy designs can be reimplemented
+   freely.
 4. Keep the trail (specs, ADRs, progress logs): it is our evidence of
    independent creation.
 
@@ -516,7 +573,7 @@ by screen-space importance, not just distance.
 |---|---|---|
 | Live chunk loads (client or server) | Snapshot palettes and light on the owner thread, convert off-thread | Our light-engine race shows why snapshots are required |
 | Block changes | Incremental update, dirty propagation up the mips, batched | Coalesce per section and per tick |
-| **Region-file import** | Parse Anvil `.mca` files directly, multi-threaded, without loading chunks in the server | Fastest way to cover an existing world or server map; Voxy has `/voxy import world` |
+| **Region-file import** | Parse Anvil `.mca` files directly, multi-threaded, without loading chunks in the server | Fastest way to cover an existing world or server map; Voxy has `/voxy import world`. Implements the user's "build LOD for everything already generated" command (§1.2): resumable, throttled, schedulable |
 | Pre-generation | Chunky/Chunksmith integration, or our own throttled generator | Already valuable in Neo-Voxy |
 | **LOD-only generation** | Run vanilla generation up to NOISE/SURFACE/FEATURES, ingest, **do not save the chunk** | DH modes and Voxy World Gen V2 do this; must be thread-safe with modded worldgen; C2ME helps |
 | **Coarse noise preview** | Sample the density functions and biome source at a coarse resolution for the far ring; replace when real data arrives | Instant horizon in seconds; no trees or structures; must fade into real data without popping |
@@ -694,6 +751,25 @@ contract** to Iris/Aperture, which benefits everyone and is the clean
 long-term path, (c) bespoke patching like Voxy (fragile, our `voxy.json`
 lesson). Recommendation: (b), with (a) as the bridge for OpenGL users.
 
+**"Any pack works without pack-specific configuration"** (user goal). What it
+takes:
+
+- Packs that already ship `dh_*` programs (most popular ones): reaching them
+  through route (a) gives zero-config support for those packs.
+- Packs with no LOD program at all: the only zero-config route is to draw LOD
+  geometry **through the pack's own `gbuffers_terrain`/`gbuffers_water`
+  programs**, emitting the same vertex attributes as vanilla terrain
+  (position, color, lightmap coordinates, normal, `mc_Entity`-like ids,
+  texture coordinates into a valid atlas). Open problems: the projection and
+  far plane (packs assume vanilla's), fog distance uniforms, the shadow pass
+  distance, depth-dependent effects (SSAO, volumetrics), and texture
+  coordinates for LOD materials. Expect "works, with artifacts" for some
+  packs; a per-pack override file is the escape hatch, not the norm.
+- The Vulkan era (Aperture) is the chance to make a generic contract
+  standard; engaging early matters more than any shim.
+
+Spike S7 (§16) must answer how far zero-config can go before we promise it.
+
 ### 10.2 Other mods
 
 - **Sodium**: hooks for section visibility and chunk bounds (avoid drawing LOD
@@ -746,7 +822,22 @@ lesson). Recommendation: (b), with (a) as the bridge for OpenGL users.
 - Cache key by server identity + world/dimension hash, invalidated on map
   reset.
 
-### 11.4 Server platforms
+### 11.4 Scale (large servers)
+
+User expectation: if the mod succeeds it will run on large servers. Design
+targets to set and test, for example:
+
+- 100+ concurrent players streaming, server CPU for LOD under a fixed budget
+  per tick, no effect on TPS.
+- Bounded memory per connected player; shared cache of hot sections.
+- Load tests with headless bot clients speaking the LOD protocol, in CI or on
+  demand, with network shaping (latency, loss, low bandwidth).
+- Graceful degradation: when the budget is exhausted, lower detail or slower
+  refinement, never gameplay lag.
+- Observability for operators: per-player and global bandwidth, queue
+  depths, generation backlog (spark-friendly metrics).
+
+### 11.5 Server platforms
 
 NeoForge/Fabric server mod, and a **Paper/Folia plugin** (DH has one): many
 public servers run Paper.
@@ -896,8 +987,15 @@ multiplayer → shader packs → public alpha.
 
 ## 18. Open questions for the Q&A
 
-1. **Minecraft versions**: 1.21.1 only at first, 26.x only, or both? The
-   Vulkan-first argument favors 26.x; our modpacks favor 1.21.1.
+Answered on 2026-10-14 (see §1.1): versions (both), license (later,
+private repository for now), name (ideas in §1.5), platforms (Windows and
+Linux), hardware (no minimum, wide presets), shader packs (zero-config if
+possible), multiplayer (large servers), unexplored terrain (yes, coarse is
+fine), distance (256-512+ chunks, user-selectable), team and time (solo, no
+deadline). Still open:
+
+1. **Minecraft versions**: answered (both). Which comes first for the
+   prototype: 1.21.1 (what the user plays) or 26.x (Vulkan-first)?
 2. **Loaders**: NeoForge and Fabric from day 1? A Paper plugin for servers?
 3. **License and name**: which license (§2)? Monetization or donations? Name
    ideas?
