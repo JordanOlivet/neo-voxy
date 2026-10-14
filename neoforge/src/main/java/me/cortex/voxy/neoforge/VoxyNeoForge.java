@@ -53,7 +53,7 @@ public class VoxyNeoForge {
 
     private void onRegisterClientCommands(RegisterClientCommandsEvent event) {
         if (VoxyCommon.isAvailable()) {
-            event.getDispatcher().register(VoxyCommands.register());
+            event.getDispatcher().register(VoxyCommands.register(VoxyCommands.CommandFeedback.VANILLA));
         }
     }
 }

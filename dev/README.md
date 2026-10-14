@@ -8,7 +8,7 @@ installations that are too large or too machine-specific for git.
 ```
 dev/
   server-neoforge/   NeoForge 1.21.1 dedicated server for multiplayer LOD streaming tests
-  server-fabric/     Fabric 1.21.1 dedicated server (once Fabric support lands)
+  server-fabric/     Fabric 1.21.1 dedicated server, same purpose
 ```
 
 ## Setting up `server-neoforge/`
@@ -27,6 +27,16 @@ dev/
    `dev/server-neoforge/mods/` (and the client `mods/` folder).
 6. Start with `run.bat` / `run.sh`. Connect a Voxy client to `localhost:25565`
    (online-mode off, any username works).
+
+## Setting up `server-fabric/`
+
+1. Download the server launcher from
+   https://meta.fabricmc.net/v2/versions/loader/1.21.1/0.16.9/1.0.1/server/jar
+   as `fabric-server-launch.jar`; `java -Xmx3G -jar fabric-server-launch.jar nogui`
+   downloads the vanilla server on first start.
+2. Same `eula.txt` and `server.properties` as above.
+3. `mods/`: Fabric API for 1.21.1 (required), Chunky Fabric optionally.
+4. `scripts\deploy-local.bat fabric` builds and copies the Fabric jar.
 
 ## Useful in-game tests
 

@@ -50,24 +50,9 @@ neoForge {
 }
 
 configurations {
-    // Resolves the Sodium 0.8.x artifact for extraction only; never a compile or
-    // runtime classpath itself.
-    sodium8Api {
+    commonSodium8Java {
         canBeResolved = true
-        canBeConsumed = false
-        transitive = false
     }
-}
-
-// Sodium 0.8.x moved its actual mod classes into a nested JarJar and left only
-// the bootstrap service in the outer jar, so depending on the artifact directly
-// exposes none of the config API. Unpack the inner jar instead. It ships in
-// Mojang mappings already, so it needs no remapping.
-def extractSodium8Api = tasks.register("extractSodium8Api", Copy) {
-    from { zipTree(configurations.sodium8Api.singleFile).matching { include "META-INF/jarjar/*-mod.jar" } }
-    into layout.buildDirectory.dir("sodium8-api")
-    eachFile { it.relativePath = new RelativePath(true, it.name) }
-    includeEmptyDirs = false
 }
 
 dependencies {
@@ -84,11 +69,15 @@ dependencies {
     compileOnly "maven.modrinth:lithium:${lithium_neoforge_version}"
     compileOnly "maven.modrinth:chunky:${chunky_neoforge_version}"
 
-    // The 0.8.x config API, scoped to the sodium8 source set so nothing outside
-    // it can accidentally link against 0.8-only classes.
-    sodium8Api "maven.modrinth:sodium:${sodium8_neoforge_version}"
-    sodium8CompileOnly fileTree(dir: layout.buildDirectory.dir("sodium8-api"), include: "*.jar")
-            .builtBy(extractSodium8Api)
+    // The 0.8.x config API (extracted by common), scoped to the sodium8 source
+    // set so nothing outside it can accidentally link against 0.8-only classes.
+    sodium8CompileOnly project(path: ':common', configuration: 'sodium8Api')
+    commonSodium8Java project(path: ':common', configuration: 'commonSodium8Java')
+}
+
+tasks.named('compileSodium8Java', JavaCompile) {
+    dependsOn(configurations.commonSodium8Java)
+    source(configurations.commonSodium8Java)
 }
 
 // Plain libraries are not visible to mods in dev runs unless added here.
@@ -124,6 +113,7 @@ shadowJar {
 
 jar {
     archiveClassifier.set('slim')
+    destinationDirectory = layout.buildDirectory.dir('devlibs')
 }
 
 assemble.dependsOn shadowJar

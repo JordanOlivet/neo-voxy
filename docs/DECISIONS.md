@@ -119,3 +119,21 @@ Rejected: `@ExpectPlatform` (Architectury bytecode transformation).
 - Display name "Neo-Voxy" on both loaders for now; renaming is cosmetic and can
   happen any time.
 - Same version number for both jars, bumped together.
+
+## ADR-010 — Fabric build specifics
+
+**Date**: 2026-10-14 · **Status**: proposed
+
+- Fabric Loom 1.8 with Gradle 8.10, same toolchain as krios. Mods built with a
+  newer Loom cannot be remapped by it: Sodium 0.8.12 Fabric (Loom 1.16) is
+  therefore not used at compile time; the `sodium8` source set compiles against
+  the Mojang-mapped 0.8 API extracted from the NeoForge jar, and `remapJar`
+  maps its Minecraft references. Upgrading Loom (and Gradle) is deferred until
+  a dependency forces it.
+- Fabric API 0.109.0+1.21.1 in dev (newer builds also need a newer Loom);
+  `fabric.mod.json` accepts any Fabric API.
+- Sodium is a `recommends`, not a `depends`: Fabric has no client-only
+  dependencies and Sodium is client-only. A client without Sodium fails on the
+  Sodium mixins, as on NeoForge without the required dependency.
+- NeoForge events missing from Fabric API are replaced by Fabric-only mixins:
+  `MixinScreenshot` (F2 sidecar) and `MixinDebugScreenOverlay` (F3 lines).

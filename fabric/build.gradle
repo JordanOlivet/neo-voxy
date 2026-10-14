@@ -1,0 +1,122 @@
+plugins {
+    id 'multiloader-loader'
+    id 'fabric-loom'
+    id 'com.github.johnrengelman.shadow'
+}
+
+// Sodium 0.8.x config entry point (ADR-003), compiled from common/src/sodium8
+// against the Mojang-mapped 0.8.x API extracted by common (see there), while
+// main stays on 0.6.x. remapJar maps its Minecraft references.
+sourceSets {
+    sodium8 {
+        compileClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
+    }
+}
+
+loom {
+    accessWidenerPath = project(':common').file('src/main/resources/voxy.accesswidener')
+    mixin {
+        defaultRefmapName = 'voxy.refmap.json'
+    }
+    runs {
+        client {
+            client()
+            configName = 'Fabric Client'
+            ideConfigGenerated(true)
+            runDir('runs/client')
+            // ./gradlew :fabric:runClient -PauditMixins forces every mixin to apply at client setup.
+            if (project.hasProperty('auditMixins')) {
+                vmArg('-Dvoxy.auditMixins=true')
+            }
+            if (project.hasProperty('quickPlay')) {
+                programArgs('--quickPlaySingleplayer', project.property('quickPlay').toString())
+            }
+        }
+        server {
+            server()
+            configName = 'Fabric Server'
+            ideConfigGenerated(true)
+            runDir('runs/server')
+        }
+    }
+}
+
+configurations {
+    commonSodium8Java {
+        canBeResolved = true
+    }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraft_version}"
+    mappings loom.officialMojangMappings()
+    modImplementation "net.fabricmc:fabric-loader:${fabric_loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_version}"
+
+    // Sodium is required on the client; dev runs use 0.6.x. The 0.8.x Fabric jar
+    // is built with Loom 1.16 and cannot be remapped by this Loom, so 0.8 is
+    // only testable in a real install.
+    modCompileOnly "maven.modrinth:sodium:${sodium_fabric_version}"
+    modLocalRuntime "maven.modrinth:sodium:${sodium_fabric_version}"
+    // Optional integrations, compile-only. -PwithIris adds Iris to dev runs.
+    modCompileOnly "maven.modrinth:iris:${iris_fabric_version}"
+    if (project.hasProperty('withIris')) {
+        modLocalRuntime "maven.modrinth:iris:${iris_fabric_dev_version}"
+        // Iris nests these with jar-in-jar, which a dev run does not unpack;
+        // without them loading any shader pack fails (NoClassDefFoundError).
+        localRuntime "io.github.douira:glsl-transformer:2.0.1"
+        localRuntime "org.anarres:jcpp:1.4.14"
+        localRuntime "org.antlr:antlr4-runtime:4.13.1"
+    }
+    modCompileOnly "maven.modrinth:lithium:${lithium_fabric_version}"
+    modCompileOnly "maven.modrinth:chunky:${chunky_fabric_version}"
+
+    sodium8CompileOnly project(path: ':common', configuration: 'sodium8Api')
+    commonSodium8Java project(path: ':common', configuration: 'commonSodium8Java')
+
+    // LWJGL core for the bundled lwjgl-lmdb/zstd in dev server runs (the client
+    // already ships it).
+    localRuntime "org.lwjgl:lwjgl:${lwjgl_version}"
+    localRuntime "org.lwjgl:lwjgl:${lwjgl_version}:natives-windows"
+    localRuntime "org.lwjgl:lwjgl:${lwjgl_version}:natives-linux"
+}
+
+// Bundled libraries (natives included) in dev runs.
+configurations.runtimeOnly.extendsFrom configurations.bundle
+
+tasks.named('compileSodium8Java', JavaCompile) {
+    dependsOn(configurations.commonSodium8Java)
+    source(configurations.commonSodium8Java)
+}
+
+processResources {
+    // NeoForge-only metadata coming from the common resources.
+    exclude 'META-INF/accesstransformer.cfg'
+    // Loom adds the refmap to this project's own mixin configs, not to the ones
+    // coming from common. Added here rather than in the shared JSON files:
+    // NeoForge needs no refmap and would warn about a missing one.
+    filesMatching(['voxy.mixins.json', 'voxy-common.mixins.json']) {
+        filter { line -> line.replaceFirst(/^(\s*)"package"/, '$1"refmap": "voxy.refmap.json", "package"') }
+    }
+}
+
+// The shipped jar: common + Fabric classes, the sodium8 entry point and the
+// bundled libraries, then remapped to intermediary by Loom.
+shadowJar {
+    configurations = [project.configurations.bundle]
+    from sourceSets.sodium8.output
+    archiveClassifier.set('dev-shadow')
+    destinationDirectory = layout.buildDirectory.dir('devlibs')
+    // A bundled library's module descriptor must not end up in the mod jar.
+    exclude '**/module-info.class'
+}
+
+remapJar {
+    inputFile = shadowJar.archiveFile
+    dependsOn shadowJar
+}
+
+jar {
+    archiveClassifier.set('slim')
+    destinationDirectory = layout.buildDirectory.dir('devlibs')
+}

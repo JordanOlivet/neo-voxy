@@ -22,6 +22,7 @@ public class VoxyClient {
             BudgetBufferRenderer.init();
 
             VoxyCommon.setInstanceFactory(VoxyClientInstance::new);
+            Logger.info("Voxy client renderer initialised");
 
             if (!Capabilities.INSTANCE.subgroup) {
                 Logger.warn("GPU does not support subgroup operations, expect some performance degradation");

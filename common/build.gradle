@@ -45,7 +45,44 @@ test {
     doFirst { testRunDir.mkdirs() }
 }
 
+// Sodium 0.8.x moved its actual mod classes into a nested JarJar and left only
+// the bootstrap service in the outer NeoForge jar, so depending on the artifact
+// directly exposes none of the config API. Unpack the inner jar instead. It is
+// in Mojang mappings, so both loaders compile their sodium8 source set against
+// it: NeoForge needs no remapping, and Fabric's remapJar maps the few Minecraft
+// references. (The Fabric 0.8 jar is built with a newer Loom than ours and
+// cannot be remapped here.)
 configurations {
+    sodium8Download {
+        canBeResolved = true
+        canBeConsumed = false
+        transitive = false
+    }
+}
+
+def extractSodium8Api = tasks.register("extractSodium8Api", Copy) {
+    from { zipTree(configurations.sodium8Download.singleFile).matching { include "META-INF/jarjar/*-mod.jar" } }
+    into layout.buildDirectory.dir("sodium8-api")
+    // Fixed name, so the consumable artifact below can point at it.
+    eachFile { it.relativePath = new RelativePath(true, 'sodium-0.8-api.jar') }
+    includeEmptyDirs = false
+}
+
+dependencies {
+    sodium8Download "maven.modrinth:sodium:${sodium8_neoforge_version}"
+}
+
+configurations {
+    sodium8Api {
+        canBeResolved = false
+        canBeConsumed = true
+    }
+    // Sodium 0.8.x config entry point (ADR-003): compiled by each loader in its
+    // own sodium8 source set against that loader's Sodium 0.8 build.
+    commonSodium8Java {
+        canBeResolved = false
+        canBeConsumed = true
+    }
     commonJava {
         canBeResolved = false
         canBeConsumed = true
@@ -57,6 +94,10 @@ configurations {
 }
 
 artifacts {
+    sodium8Api(layout.buildDirectory.file('sodium8-api/sodium-0.8-api.jar')) {
+        builtBy extractSodium8Api
+    }
+    commonSodium8Java file('src/sodium8/java')
     commonJava sourceSets.main.java.sourceDirectories.singleFile
     commonResources sourceSets.main.resources.sourceDirectories.singleFile
 }
