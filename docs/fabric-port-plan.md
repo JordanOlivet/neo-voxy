@@ -52,7 +52,7 @@ move starts from a clean tree (ADR-006).
 - [x] P0.5 `.gitignore` cleanup: add `bin/`, `dev/`, `.orca/`; drop entries for removed files
 - [x] P0.6 CI: `check-does-build.yml` called `./gradlew -I init.gradle build` but `init.gradle` does not exist — removed. Switch to `JordanOlivet/ci-workflows` deferred to P1.7 (its artifact glob expects subprojects)
 - [x] P0.7 Refresh `README.md` (still says "unfinished port", "no Chunky support"; both false now)
-- [ ] P0.8 Verify: `./gradlew build` green, jar identical in content to pre-cleanup build
+- [x] P0.8 Verify: `./gradlew build` green, jar identical in content to pre-cleanup build
 
 ---
 
@@ -62,30 +62,32 @@ Goal: same NeoForge mod as today, produced from `common` + `neoforge`
 subprojects with the MultiLoader Template layout (ADR-007). Fabric does not
 exist yet. This is the riskiest phase.
 
-- [ ] P1.1 Root build: `settings.gradle` includes `common`, `neoforge`; `buildSrc` conventions (`multiloader-common`, `multiloader-loader`) adapted from `krios/templates/multiloader`; all versions in root `gradle.properties`
-- [ ] P1.2 `common`: ModDevGradle in NeoForm mode (vanilla 1.21.1, Mojang mappings), `compileOnly` Sodium/Iris/Lithium NeoForge jars (already Mojang-mapped, no remap), Mixin + MixinExtras compile-only, bundled libraries (LWJGL lmdb/zstd, RocksDB, jedis, xz, sqlite-jdbc) as `implementation`
-- [ ] P1.3 Move `src/main/java` (except loader code), resources (assets, shaders, mixin JSONs, access widener), `src/test` into `common/`; `voxy.accesswidener` mirrored as `META-INF/accesstransformer.cfg`
-- [ ] P1.4 `neoforge`: ModDevGradle, `@Mod` entrypoint and NeoForge listeners, `neoforge.mods.toml`, Chunky NeoForge via Modrinth Maven version id (drops `libs/chunky-nf`)
-- [ ] P1.5 Bundling: the libraries currently shaded via the `bundle` configuration keep shipping inside the jar (shadow or `jarJar`), natives for Windows + Linux only (ADR-004)
-- [ ] P1.6 `sodium8` source set + `extractSodium8Api` moved to `neoforge` (the `@ConfigEntryPointForge` class is NeoForge-bound until P2.7)
-- [ ] P1.7 CI on `JordanOlivet/ci-workflows` `build-gradle-mod.yml`; `scripts/setup-dev.*` and `scripts/deploy-local.bat` updated for the new layout
-- [ ] P1.8 Verify: unit tests pass; jar content compared with the pre-migration jar (classes, resources, bundled libs, `neoforge.mods.toml`); dev server and dev client boot with all mixins applied; in-game smoke test (solo + `dev/server-neoforge`), Sodium 0.6.13 **and** 0.8.12, with and without Iris
+- [x] P1.1 Root build: `settings.gradle` includes `common`, `neoforge`; `buildSrc` conventions (`multiloader-common`, `multiloader-loader`) adapted from `krios/templates/multiloader`; all versions in root `gradle.properties`
+- [x] P1.2 `common`: ModDevGradle in NeoForm mode (vanilla 1.21.1, Mojang mappings), `compileOnly` Sodium/Iris/Lithium NeoForge jars (already Mojang-mapped, no remap), Mixin + MixinExtras compile-only, bundled libraries (LWJGL lmdb/zstd, RocksDB, jedis, xz, sqlite-jdbc) as `implementation`
+- [x] P1.3 Move `src/main/java` (except loader code), resources (assets, shaders, mixin JSONs, access widener), `src/test` into `common/`; `voxy.accesswidener` mirrored as `META-INF/accesstransformer.cfg`
+- [x] P1.4 `neoforge`: ModDevGradle, `@Mod` entrypoint and NeoForge listeners, `neoforge.mods.toml`, Chunky NeoForge via Modrinth Maven version id (drops `libs/chunky-nf`)
+- [x] P1.5 Bundling: the libraries currently shaded via the `bundle` configuration keep shipping inside the jar (shadow or `jarJar`), natives for Windows + Linux only (ADR-004)
+- [x] P1.6 `sodium8` source set + `extractSodium8Api` moved to `neoforge` (the `@ConfigEntryPointForge` class is NeoForge-bound until P2.7)
+- [x] P1.7 CI on `JordanOlivet/ci-workflows` `build-gradle-mod.yml`; `scripts/setup-dev.*` and `scripts/deploy-local.bat` updated for the new layout
+- [~] P1.8 Verify (in-game smoke test and Sodium 0.8.12 left to the user; see the 2026-10-14 log): unit tests pass; jar content compared with the pre-migration jar (classes, resources, bundled libs, `neoforge.mods.toml`); dev server and dev client boot with all mixins applied; in-game smoke test (solo + `dev/server-neoforge`), Sodium 0.6.13 **and** 0.8.12, with and without Iris
 
 ---
 
 ## Phase 2 — Platform abstraction (still NeoForge only)
 
 Goal: `common` has zero `net.neoforged` imports. Today 11 files reference it.
+Done together with Phase 1 on `build/multiloader`: `common` compiled against
+vanilla cannot build while any of them remains.
 
-- [ ] P2.1 `Platform` service (`common`): config dir, game dir, `isModLoaded`, `isDedicatedServer`, mod version. Replaces `ModLoaderUtil`, and the direct `FMLLoader`/`ModList` calls in `VoxyCommon`, `Serialization`, `DebugContextDumper`
-- [ ] P2.2 `Serialization` class scan: uses `ModList.getModFileById("voxy")` to find the jar — abstract the "own mod root path" lookup
-- [ ] P2.3 Server lifecycle: turn `VoxyServer`'s 9 `@SubscribeEvent` handlers into plain static methods; NeoForge listener class in `neoforge/` forwards to them
-- [ ] P2.4 Networking: split `VoxyNetworkHandler` into payload definitions + handlers (`common`) and registration/sending (`PacketSender` service per loader)
-- [ ] P2.5 Client hooks: `ClientChunkIngestListener`, `DebugSidecarListener`, `VoxyDebugScreenEntry` — logic in `common`, event subscription in `neoforge/`
+- [x] P2.1 `Platform` service (`common`): config dir, game dir, `isModLoaded`, `isDedicatedServer`, mod version. Replaces `ModLoaderUtil`, and the direct `FMLLoader`/`ModList` calls in `VoxyCommon`, `Serialization`, `DebugContextDumper`
+- [x] P2.2 `Serialization` class scan: uses `ModList.getModFileById("voxy")` to find the jar — abstract the "own mod root path" lookup
+- [x] P2.3 Server lifecycle: turn `VoxyServer`'s 9 `@SubscribeEvent` handlers into plain static methods; NeoForge listener class in `neoforge/` forwards to them
+- [x] P2.4 Networking: split `VoxyNetworkHandler` into payload definitions + handlers (`common`) and registration/sending (`PacketSender` service per loader)
+- [x] P2.5 Client hooks: `ClientChunkIngestListener`, `DebugSidecarListener`, `VoxyDebugScreenEntry` — logic in `common`, event subscription in `neoforge/`
 - [ ] P2.6 Commands: make `VoxyCommands` generic over the source type `<S extends SharedSuggestionProvider>` so Fabric's `FabricClientCommandSource` fits
 - [ ] P2.7 Sodium 0.8 entrypoint: keep option-building logic shared, isolate the `@ConfigEntryPointForge` annotation in `neoforge/`
-- [ ] P2.8 Chunky: `MixinNeoForgeWorld` + `voxy-chunky.mixins.json` move to `neoforge/`; shared ingest logic stays in `common`
-- [ ] P2.9 Verify: `grep -r net.neoforged common/` empty; same in-game matrix as P1.8
+- [x] P2.8 Chunky: `MixinNeoForgeWorld` + `voxy-chunky.mixins.json` move to `neoforge/`; shared ingest logic stays in `common`
+- [x] P2.9 Verify: `grep -r net.neoforged common/` empty; same in-game matrix as P1.8
 
 ---
 

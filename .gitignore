@@ -1,12 +1,13 @@
-# Gradle / IDE output
-/.gradle/
-/build/
-/bin/
+# Gradle / IDE output (root and subprojects)
+.gradle/
+build/
+bin/
 /.idea/
 .vscode
 
-# Dev runtime state (Loom run dir, local test servers)
-/run/
+# Dev runtime state (loader run dirs, local test servers)
+run/
+runs/
 /dev/*
 !/dev/README.md
 
@@ -16,3 +17,6 @@
 # Local tooling
 .claude
 .orca
+
+# Local JDK fetched by scripts/setup-dev.sh
+.dev/

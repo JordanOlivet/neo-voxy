@@ -42,8 +42,8 @@ Known incompatibility: BetterFpsDist.
 This is a **source-only** fork: build it yourself (see License).
 
 ```bash
-scripts/setup-dev.sh        # first clone: fetches the jars that are not in git
-./gradlew build             # jar in build/libs/
+scripts/setup-dev.sh        # first clone: ensures a JVM, then builds
+./gradlew build             # jar in neoforge/build/libs/
 ```
 
 On Windows, `scripts/setup-dev.ps1` does the same as `setup-dev.sh`, and
@@ -54,7 +54,9 @@ On Windows, `scripts/setup-dev.ps1` does the same as `setup-dev.sh`, and
 
 | Path | Content |
 |------|---------|
-| `src/` | Mod sources, resources and unit tests |
+| `common/` | Loader-agnostic code (~95%), resources, unit tests |
+| `neoforge/` | NeoForge entry point, event wiring, platform services |
+| `buildSrc/` | Shared Gradle conventions (MultiLoader Template) |
 | `docs/` | Plans, decisions (`DECISIONS.md`), progress logs, analyses |
 | `scripts/` | Dev environment setup and local deploy helpers |
 | `dev/` | Local runtime state (test servers), gitignored except its README |
