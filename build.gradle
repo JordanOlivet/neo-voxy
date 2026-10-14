@@ -118,9 +118,10 @@ dependencies {
     //modCompileOnly "maven.modrinth:nvidium:0.3.0-beta"
 
     // Optional: Chunky integration (auto-ingest generated chunks into Voxy).
-    // Modrinth Maven resolves "chunky:1.4.23" to the Forge jar; the NeoForge jar
-    // (containing NeoForgeWorld) is stored locally under libs/chunky-nf/.
-    modCompileOnly fileTree(dir: "libs/chunky-nf", include: "*.jar")
+    // Modrinth Maven resolves "chunky:1.4.23" to the Forge jar; the NeoForge
+    // 1.4.23 jar (containing NeoForgeWorld) is selected by its Modrinth version id,
+    // so a fresh clone and CI compile without anything under libs/.
+    modCompileOnly "maven.modrinth:chunky:LuFhm4eU"
 }
 
 shadowJar {
@@ -195,4 +196,8 @@ dependencies {
 
 test {
     useJUnitPlatform()
+    // Keep the log4j logs/ folder the tests create out of the repository root.
+    def testRunDir = layout.buildDirectory.dir("test-run").get().asFile
+    workingDir = testRunDir
+    doFirst { testRunDir.mkdirs() }
 }

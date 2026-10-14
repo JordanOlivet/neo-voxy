@@ -1,14 +1,18 @@
-# Project exclude paths
+# Gradle / IDE output
 /.gradle/
 /build/
-/run/
+/bin/
 /.idea/
-.claude
-dist
-logs
-/libs
-build.bat
-server_test
 .vscode
-_build-and-deploy.bat
-_run-test-server.bat.lnk
+
+# Dev runtime state (Loom run dir, local test servers)
+/run/
+/dev/*
+!/dev/README.md
+
+# Jars fetched by scripts/setup-dev.* (not redistributable)
+/libs
+
+# Local tooling
+.claude
+.orca

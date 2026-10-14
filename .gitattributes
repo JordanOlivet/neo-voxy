@@ -2,3 +2,5 @@
 *.sh text eol=lf
 # Gradle wrapper script is POSIX sh too.
 gradlew text eol=lf
+# Windows batch scripts need CRLF.
+*.bat text eol=crlf

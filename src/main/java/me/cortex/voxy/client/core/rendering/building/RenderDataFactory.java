@@ -1044,7 +1044,7 @@ public class RenderDataFactory {
                         //Check if next culls this face
                         if (CHECK_NEIGHBOR_FACE_OCCLUSION) {
                             // Wired (2026-04-27): mask-aware face cover (was bare faceOccludes
-                            // on neighbor meta only — see ANALYSIS.md item 11(a)).
+                            // on neighbor meta only — see docs/analysis/port-analysis.md item 11(a)).
                             int selfId = (int)((selfModel >> 26) & 0xFFFF);
                             int neighborId = (int)((nextModel >> 26) & 0xFFFF);
                             if (this.isFaceCoveredByNeighbor(selfId, (2 << 1) | facingForward, neighborId, this.sectionData[iB + 1])) {
