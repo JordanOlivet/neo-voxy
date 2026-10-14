@@ -181,7 +181,7 @@ public abstract class VoxyConfigScreenPages {
                         .setName(Component.translatable("voxy.config.general.render_statistics"))
                         .setTooltip(Component.translatable("voxy.config.general.render_statistics.tooltip"))
                         .setControl(TickBoxControl::new)
-                        .setBinding((s, v) -> RenderStatistics.enabled = v, s -> RenderStatistics.enabled)
+                        .setBinding((s, v) -> RenderStatistics.enabled = s.renderStatistics = v, s -> s.renderStatistics)
                         .setFlags(OptionFlag.REQUIRES_RENDERER_RELOAD)
                         .build())
                 .add(OptionImpl.createBuilder(boolean.class, storage)

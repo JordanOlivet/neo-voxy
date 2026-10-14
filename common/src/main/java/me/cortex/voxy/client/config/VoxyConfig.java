@@ -100,6 +100,7 @@ public class VoxyConfig {
                     if (conf != null) {
                         conf.save();
                         me.cortex.voxy.common.VoxyDiag.setEnabled(conf.diagFirstConnect);
+                        me.cortex.voxy.client.RenderStatistics.enabled = conf.renderStatistics;
                         return conf;
                     } else {
                         Logger.error("Failed to load voxy config, resetting");
@@ -116,6 +117,7 @@ public class VoxyConfig {
             result.enableRendering = false;
         }
         me.cortex.voxy.common.VoxyDiag.setEnabled(result.diagFirstConnect);
+        me.cortex.voxy.client.RenderStatistics.enabled = result.renderStatistics;
         return result;
     }
 

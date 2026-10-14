@@ -214,12 +214,11 @@ public class VoxySodiumConfig implements ConfigEntryPoint {
                 .addOption(builder.createBooleanOption(id("render_statistics"))
                         .setName(Component.translatable("voxy.config.general.render_statistics"))
                         .setTooltip(Component.translatable("voxy.config.general.render_statistics.tooltip"))
-                        // Backed by a static flag rather than by VoxyConfig, matching the
-                        // behaviour of the 0.6.x page.
                         .setDefaultValue(DEFAULTS.renderStatistics)
                         .setStorageHandler(SAVE)
                         .setFlags(OptionFlag.REQUIRES_RENDERER_RELOAD)
-                        .setBinding(v -> RenderStatistics.enabled = v, () -> RenderStatistics.enabled))
+                        .setBinding(v -> RenderStatistics.enabled = VoxyConfig.CONFIG.renderStatistics = v,
+                                () -> VoxyConfig.CONFIG.renderStatistics))
                 .addOption(builder.createBooleanOption(id("debug_dump_on_screenshot"))
                         .setName(Component.translatable("voxy.config.general.debug_dump_on_screenshot"))
                         .setTooltip(Component.translatable("voxy.config.general.debug_dump_on_screenshot.tooltip"))

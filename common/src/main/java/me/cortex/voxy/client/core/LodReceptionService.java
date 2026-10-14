@@ -122,6 +122,10 @@ public class LodReceptionService implements AutoCloseable {
         });
         Logger.info("LodReceptionService processing pool: " + workers + " workers");
 
+        // A new reception service means a new connection: never reuse the previous
+        // connection's server-support answer.
+        VoxyNetworkHandler.resetConnectionState();
+
         // Register client message handler
         VoxyNetworkHandler.setClientMessageHandler(this::handleServerMessage);
 
